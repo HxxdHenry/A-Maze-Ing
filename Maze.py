@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import math
+import time
 from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR, PLAYER_COLOR
 
 Cell = Tuple[int, int]
@@ -272,6 +273,12 @@ def main():
     queued_dir: Optional[str] = None
     won = False
 
+    # Timer state
+    timer_started = False
+    timer_start_time = 0.0
+    timer_end_time = 0.0
+    timer_elapsed = 0.0
+
     def update_caption():
         title = (
             f"{level['name']} | {CELLS_W}x{CELLS_H} | "
@@ -360,6 +367,14 @@ def main():
         # Player
         pygame.draw.circle(screen, PLAYER_COLOR, (int(player_px), int(player_py)), int(cs * 0.35))
 
+        # Timer display
+        if timer_started:
+            elapsed = time.perf_counter() - timer_start_time
+        else:
+            elapsed = timer_elapsed if won else 0.0
+        timer_text = font.render(f"Time: {elapsed:.3f} s", True, (255, 255, 0))
+        screen.blit(timer_text, (MARGIN, MARGIN - 8))
+
         # Win message
         if won:
             text = font.render("Goal reached! Press R to regenerate", True, (255, 255, 255))
@@ -410,6 +425,11 @@ def main():
                     target_cell = None
                     queued_dir = None
                     won = False
+                    # Reset timer
+                    timer_started = False
+                    timer_start_time = 0.0
+                    timer_end_time = 0.0
+                    timer_elapsed = 0.0
                     update_caption()
 
                 elif event.key == pygame.K_c:
@@ -423,6 +443,11 @@ def main():
                     target_cell = None
                     queued_dir = None
                     won = False
+                    # Reset timer
+                    timer_started = False
+                    timer_start_time = 0.0
+                    timer_end_time = 0.0
+                    timer_elapsed = 0.0
                     update_caption()
 
         # Movement update (smooth sliding)
@@ -439,14 +464,24 @@ def main():
             arrived = (abs(player_px - target_px) < 0.5) and (abs(player_py - target_py) < 0.5)
             if arrived:
                 player_px, player_py = target_px, target_py
+                prev_cell = player_cell
                 player_cell = target_cell
                 moving = False
                 move_dir = None
                 target_cell = None
 
+                # Start timer when leaving start cell
+                if not timer_started and prev_cell == start and player_cell != start:
+                    timer_started = True
+                    timer_start_time = time.perf_counter()
+
                 # Check win
                 if player_cell == goal:
                     won = True
+                    if timer_started:
+                        timer_end_time = time.perf_counter()
+                        timer_elapsed = timer_end_time - timer_start_time
+                        timer_started = False
 
                 # Keep sliding if input held
                 if not won:

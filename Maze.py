@@ -232,7 +232,7 @@ def main():
         dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08, braid=0.01),
         dict(name="harder", newest=0.92, loop=0.20, junction=0.12, braid=0.01),
         dict(name="extreme", newest=0.94, loop=0.28, junction=0.18, braid=0.02),
-        dict(name="insane", newest=0.95, loop=0.32, junction=0.22, braid=0.02),
+        dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
     ]
     # Default: significantly harder with many dead ends AND high branching
     complexity_idx = 4  # 0 - "insane"

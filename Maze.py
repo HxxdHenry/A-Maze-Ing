@@ -1,15 +1,10 @@
-# maze_manual_smooth.py
-# Smooth sliding maze with higher difficulty:
-# - Growing-Tree generator (bias -> many dead ends)
-# - Smart loops + junction enrichment -> higher branching without removing most dead ends
-# pip install pygame
-
 import pygame
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import math
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR, PLAYER_COLOR
 
 Cell = Tuple[int, int]
 
@@ -76,7 +71,7 @@ class Maze:
         return deg
 
     @staticmethod
-    def generate_growing_tree(width: int, height: int, newest_bias: float = 0.9, seed: Optional[int] = None) -> 'Maze':
+    def generate_growing_tree(width: int, height: int, newest_bias: float = 1.0, seed: Optional[int] = None) -> 'Maze':
         """
         Growing Tree algorithm:
         - newest_bias≈1.0 -> backtracker style (many dead ends, long corridors)
@@ -221,18 +216,7 @@ def maze_metrics(maze: Maze) -> Tuple[int, int, float]:
 
 def main():
     # Grid size (big = harder)
-    CELLS_W = 40
-    CELLS_H = 40
-    CELL_SIZE = 16
     MARGIN = 16
-
-    # Colors
-    BG_COLOR = (28, 28, 32)
-    WALL_COLOR = (240, 90, 90)
-    GRID_COLOR = (60, 60, 70)
-    START_COLOR = (70, 200, 110)
-    GOAL_COLOR = (245, 210, 90)
-    PLAYER_COLOR = (220, 220, 255)
 
     # Player movement speed (cells per second)
     SPEED_CELLS_PER_SEC = 8.0
@@ -247,10 +231,11 @@ def main():
         dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08, braid=0.01),
         dict(name="harder", newest=0.92, loop=0.20, junction=0.12, braid=0.01),
         dict(name="extreme", newest=0.94, loop=0.28, junction=0.18, braid=0.02),
-        dict(name="insane", newest=0.95, loop=0.32, junction=0.22, braid=0.02),
+        # dict(name="insane", newest=0.95, loop=0.32, junction=0.22, braid=0.02),
+        dict(name="insane", newest=0.98, loop=0.75, junction=0.5, braid=0.3),
     ]
     # Default: significantly harder with many dead ends AND high branching
-    complexity_idx = 3  # "extreme"
+    complexity_idx = 0  # "extreme"
 
     pygame.init()
     screen_w = CELLS_W * CELL_SIZE + MARGIN * 2

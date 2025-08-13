@@ -235,7 +235,7 @@ def main():
         dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
     ]
     # Default: significantly harder with many dead ends AND high branching
-    complexity_idx = 4  # 0 - "insane"
+    complexity_idx = 0  # 0 - "insane"
 
     pygame.init()
     screen_w = CELLS_W * CELL_SIZE + MARGIN * 2

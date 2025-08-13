@@ -1,0 +1,1810 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+The content has been processed where comments have been removed, empty lines have been removed.
+
+<directory_structure>
+.repomixignore
+Astart.py
+config.py
+Deadend.py
+Dijkstra.py
+FloodFill.py
+Maze.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="Deadend.py">
+import pygame
+import random
+import time
+from collections import deque
+from typing import Dict, List, Tuple, Optional, Set
+from Maze import Maze
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR
+Cell = Tuple[int, int]
+CORE_COLOR = (80, 200, 255)
+PRUNED_COLOR = (240, 100, 100)
+PATH_COLOR = (255, 215, 0)
+BOT_COLOR = (255, 255, 255)
+def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
+    dist = {start: 0}
+    q = deque([start])
+    while q:
+        c = q.popleft()
+        for n in maze.neighbors(c):
+            if n not in dist:
+                dist[n] = dist[c] + 1
+                q.append(n)
+    return dist
+def farthest_cell(maze: Maze, start: Cell) -> Tuple[Cell, int]:
+    dist = bfs_distances(maze, start)
+    cell = max(dist, key=dist.get)
+    return cell, dist[cell]
+def choose_far_apart_pair(maze: Maze) -> Tuple[Cell, Cell, int]:
+    start0 = (random.randrange(maze.width), random.randrange(maze.height))
+    a, _ = farthest_cell(maze, start0)
+    b, d = farthest_cell(maze, a)
+    return a, b, d
+def build_adjacency(maze: Maze) -> Dict[Cell, Set[Cell]]:
+    adj: Dict[Cell, Set[Cell]] = {}
+    for y in range(maze.height):
+        for x in range(maze.width):
+            u = (x, y)
+            adj[u] = set(maze.neighbors(u))
+    return adj
+def bfs_path_in_adj(adj: Dict[Cell, Set[Cell]], start: Cell, goal: Cell) -> List[Cell]:
+    if start not in adj or goal not in adj:
+        return []
+    q = deque([start])
+    parent: Dict[Cell, Optional[Cell]] = {start: None}
+    while q:
+        u = q.popleft()
+        if u == goal:
+            break
+        for v in adj[u]:
+            if v not in parent:
+                parent[v] = u
+                q.append(v)
+    if goal not in parent:
+        return []
+    path = [goal]
+    cur = goal
+    while parent[cur] is not None:
+        cur = parent[cur]
+        path.append(cur)
+    path.reverse()
+    return path
+def main():
+    pygame.init()
+    MARGIN = 16
+    screen_w = CELLS_W * CELL_SIZE + MARGIN * 2
+    screen_h = CELLS_H * CELL_SIZE + MARGIN * 2
+    screen = pygame.display.set_mode((screen_w, screen_h))
+    pygame.display.set_caption("Maze (Dead-End Filling)")
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
+    complexity_levels = [
+        dict(name="perfect", newest=0.95, loop=0.00, junction=0.00),
+        dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08),
+        dict(name="harder", newest=0.92, loop=0.20, junction=0.12),
+        dict(name="extreme", newest=0.94, loop=0.28, junction=0.18),
+        dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
+    ]
+    complexity_idx = 0
+    PRUNE_RATE_SLOW = 500
+    PRUNE_RATE_FAST = 5000
+    prune_rate = PRUNE_RATE_SLOW
+    AUTO_START = True
+    BOT_SPEED_CELLS_PER_SEC = 8.0
+    def cell_center_px(cell: Cell) -> Tuple[float, float]:
+        x, y = cell
+        return (MARGIN + x * CELL_SIZE + CELL_SIZE / 2, MARGIN + y * CELL_SIZE + CELL_SIZE / 2)
+    def build_maze_and_positions():
+        level = complexity_levels[complexity_idx]
+        m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
+        m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.6)
+        m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
+        s, g, dist = choose_far_apart_pair(m)
+        return m, s, g, level, dist
+    maze, start, goal, level, dist_sg = build_maze_and_positions()
+    state = "idle"
+    full_adj: Dict[Cell, Set[Cell]] = build_adjacency(maze)
+    active_adj: Dict[Cell, Set[Cell]] = {u: set(vs) for u, vs in full_adj.items()}
+    degree: Dict[Cell, int] = {u: len(vs) for u, vs in active_adj.items()}
+    leaves: deque[Cell] = deque()
+    pruned: Set[Cell] = set()
+    core_set: Set[Cell] = set()
+    path: List[Cell] = []
+    path_set: Set[Cell] = set()
+    search_started = False
+    search_start_time = 0.0
+    search_end_time = 0.0
+    search_time = 0.0
+    traverse_started = False
+    traverse_start_time = 0.0
+    traverse_end_time = 0.0
+    traverse_time = 0.0
+    bot_idx = 0
+    bot_px, bot_py = cell_center_px(start)
+    target_px, target_py = bot_px, bot_py
+    moving = False
+    prune_budget = 0.0
+    def set_caption(phase: str):
+        title = (
+            f"Dead-End Filling | {level['name']} | {CELLS_W}x{CELLS_H} | "
+            f"newest={level['newest']:.2f} loops={level['loop']:.2f} "
+            f"junction={level['junction']:.2f} | start→goal={dist_sg} | {phase.upper()}"
+        )
+        pygame.display.set_caption(title)
+    def seed_leaves():
+        nonlocal leaves
+        leaves.clear()
+        for u, d in degree.items():
+            if d == 1 and u not in (start, goal):
+                leaves.append(u)
+    def start_search():
+        nonlocal full_adj, active_adj, degree, leaves, pruned, core_set
+        nonlocal search_started, search_start_time, search_end_time, search_time, state
+        full_adj = build_adjacency(maze)
+        active_adj = {u: set(vs) for u, vs in full_adj.items()}
+        degree = {u: len(vs) for u, vs in active_adj.items()}
+        pruned.clear()
+        core_set.clear()
+        seed_leaves()
+        search_started = True
+        search_start_time = time.perf_counter()
+        search_end_time = 0.0
+        search_time = 0.0
+        state = "pruning"
+        set_caption("pruning")
+    def reachable(adj: Dict[Cell, Set[Cell]], src: Cell) -> Set[Cell]:
+        if src not in adj:
+            return set()
+        seen = {src}
+        q = deque([src])
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if v not in seen:
+                    seen.add(v)
+                    q.append(v)
+        return seen
+    def finish_pruning():
+        nonlocal search_end_time, search_time, core_set, active_adj, path, path_set, state
+        search_end_time = time.perf_counter()
+        search_time = search_end_time - search_start_time
+        rs = reachable(active_adj, start)
+        rg = reachable(active_adj, goal)
+        keep = rs & rg
+        core_set = set(keep)
+        active_adj = {u: set(v for v in vs if v in keep) for u, vs in active_adj.items() if u in keep}
+        path = bfs_path_in_adj(active_adj, start, goal)
+        path_set = set(path)
+        state = "cleaning"
+    def start_traversal():
+        nonlocal bot_idx, bot_px, bot_py, target_px, target_py, moving
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time, state
+        if not path:
+            state = "done"
+            set_caption("done")
+            return
+        bot_idx = 0
+        bot_px, bot_py = cell_center_px(path[0])
+        if len(path) > 1:
+            target_px, target_py = cell_center_px(path[1])
+            moving = True
+        else:
+            moving = False
+        traverse_started = True
+        traverse_start_time = time.perf_counter()
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        state = "traversing"
+        set_caption("traversing")
+    def regenerate():
+        nonlocal maze, start, goal, level, dist_sg
+        nonlocal state, full_adj, active_adj, degree, leaves, pruned, core_set
+        nonlocal path, path_set
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time
+        nonlocal bot_px, bot_py, target_px, target_py, moving, prune_budget
+        maze, start, goal, level, dist_sg = build_maze_and_positions()
+        full_adj = build_adjacency(maze)
+        active_adj = {u: set(vs) for u, vs in full_adj.items()}
+        degree = {u: len(vs) for u, vs in active_adj.items()}
+        leaves = deque()
+        pruned = set()
+        core_set = set()
+        path = []
+        path_set = set()
+        search_started = False
+        search_start_time = 0.0
+        search_end_time = 0.0
+        search_time = 0.0
+        traverse_started = False
+        traverse_start_time = 0.0
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        bot_px, bot_py = cell_center_px(start)
+        target_px, target_py = bot_px, bot_py
+        moving = False
+        prune_budget = 0.0
+        state = "idle"
+        set_caption("idle")
+        if AUTO_START:
+            start_search()
+    def draw():
+        screen.fill(BG_COLOR)
+        cs = CELL_SIZE
+        m = MARGIN
+        for y in range(CELLS_H + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m, m + y * cs), (m + CELLS_W * cs, m + y * cs), 1)
+        for x in range(CELLS_W + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m + x * cs, m), (m + x * cs, m + CELLS_H * cs), 1)
+        for y in range(maze.height):
+            for x in range(maze.width):
+                cx = m + x * cs
+                cy = m + y * cs
+                walls = maze.grid[y][x]
+                if walls['N']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx + cs, cy), 3)
+                if walls['S']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy + cs), (cx + cs, cy + cs), 3)
+                if walls['W']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx, cy + cs), 3)
+                if walls['E']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx + cs, cy), (cx + cs, cy + cs), 3)
+        pad = 5
+        if state == "pruning":
+            for (x, y) in pruned:
+                rect = pygame.Rect(m + x * cs + pad + 3, m + y * cs + pad + 3, cs - 2 * pad - 6, cs - 2 * pad - 6)
+                pygame.draw.rect(screen, PRUNED_COLOR, rect, border_radius=6)
+            current_core = [u for u, d in degree.items() if (d > 0 or u in (start, goal)) and u not in pruned]
+            for (x, y) in current_core:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, CORE_COLOR, rect, border_radius=6)
+        if state in ("cleaning", "traversing", "done") and path_set:
+            for (x, y) in path_set:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, PATH_COLOR, rect, border_radius=6)
+        sx, sy = start
+        gx, gy = goal
+        srect = pygame.Rect(m + sx * cs + 6, m + sy * cs + 6, cs - 12, cs - 12)
+        grect = pygame.Rect(m + gx * cs + 6, m + gy * cs + 6, cs - 12, cs - 12)
+        pygame.draw.rect(screen, START_COLOR, srect, border_radius=4)
+        pygame.draw.rect(screen, GOAL_COLOR, grect, border_radius=4)
+        if state in ("traversing", "done"):
+            pygame.draw.circle(screen, BOT_COLOR, (int(bot_px), int(bot_py)), int(cs * 0.30))
+        if search_started and search_end_time == 0.0:
+            cur = time.perf_counter() - search_start_time
+            search_text = f"Prune: {cur:.3f} s"
+        else:
+            search_text = f"Prune: {search_time:.3f} s"
+        if traverse_started and traverse_end_time == 0.0:
+            cur = time.perf_counter() - traverse_start_time
+            traverse_text = f"Traverse: {cur:.3f} s"
+            total_text = f"Total: {(search_time + cur):.3f} s"
+        else:
+            traverse_text = f"Traverse: {traverse_time:.3f} s"
+            total_text = f"Total: {(search_time + traverse_time):.3f} s"
+        t1 = font.render(search_text, True, (255, 255, 0))
+        t2 = font.render(traverse_text, True, (255, 255, 0))
+        t3 = font.render(total_text, True, (255, 255, 255))
+        hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle prune speed | ESC=quit", True, (200, 200, 200))
+        meta = font.render(f"prunes/s={prune_rate}", True, (180, 180, 180))
+        screen.blit(t1, (MARGIN, MARGIN - 8))
+        screen.blit(t2, (MARGIN + 200, MARGIN - 8))
+        screen.blit(t3, (MARGIN + 420, MARGIN - 8))
+        screen.blit(meta, (MARGIN, MARGIN + 14))
+        screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
+        pygame.display.flip()
+    regenerate()
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE,):
+                    running = False
+                elif event.key == pygame.K_SPACE:
+                    if state == "idle":
+                        start_search()
+                elif event.key == pygame.K_r:
+                    regenerate()
+                elif event.key == pygame.K_c:
+                    complexity_idx = (complexity_idx + 1) % len(complexity_levels)
+                    regenerate()
+                elif event.key == pygame.K_f:
+                    prune_rate = PRUNE_RATE_FAST if prune_rate == PRUNE_RATE_SLOW else PRUNE_RATE_SLOW
+        if state == "pruning":
+            prune_budget += prune_rate * dt
+            steps = int(prune_budget)
+            if steps > 0:
+                prune_budget -= steps
+            if not leaves and all((degree.get(u, 0) != 1 or u in (start, goal)) for u in degree):
+                finish_pruning()
+            else:
+                for _ in range(steps):
+                    if not leaves:
+                        break
+                    u = leaves.popleft()
+                    if u in pruned:
+                        continue
+                    if u in (start, goal):
+                        continue
+                    if degree.get(u, 0) != 1:
+                        continue
+                    if not active_adj[u]:
+                        continue
+                    v = next(iter(active_adj[u]))
+                    active_adj[u].discard(v)
+                    active_adj[v].discard(u)
+                    degree[u] = 0
+                    degree[v] = max(0, degree.get(v, 0) - 1)
+                    pruned.add(u)
+                    if v not in (start, goal) and degree[v] == 1:
+                        leaves.append(v)
+            if not leaves and all((degree.get(u, 0) != 1 or u in (start, goal)) for u in degree):
+                finish_pruning()
+        if state == "cleaning":
+            start_traversal()
+        if state == "traversing" and path:
+            speed_px = BOT_SPEED_CELLS_PER_SEC * CELL_SIZE
+            if moving:
+                dx = target_px - bot_px
+                dy = target_py - bot_py
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist > 0:
+                    step = speed_px * dt
+                    if step >= dist:
+                        bot_px, bot_py = target_px, target_py
+                    else:
+                        bot_px += dx / dist * step
+                        bot_py += dy / dist * step
+                arrived = abs(bot_px - target_px) < 0.5 and abs(bot_py - target_py) < 0.5
+                if arrived:
+                    bot_idx += 1
+                    if bot_idx >= len(path) - 1:
+                        moving = False
+                        traverse_end_time = time.perf_counter()
+                        traverse_time = traverse_end_time - traverse_start_time
+                        state = "done"
+                        set_caption("done")
+                    else:
+                        target_px, target_py = cell_center_px(path[bot_idx + 1])
+        draw()
+    pygame.quit()
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="Dijkstra.py">
+import pygame
+import random
+import time
+import heapq
+from collections import deque
+from typing import Dict, List, Tuple, Set
+from Maze import Maze
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR
+Cell = Tuple[int, int]
+OPEN_COLOR = (80, 220, 140)
+CLOSED_COLOR = (80, 160, 255)
+PATH_COLOR = (255, 215, 0)
+BOT_COLOR = (255, 255, 255)
+def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
+    dist = {start: 0}
+    q = deque([start])
+    while q:
+        c = q.popleft()
+        for n in maze.neighbors(c):
+            if n not in dist:
+                dist[n] = dist[c] + 1
+                q.append(n)
+    return dist
+def farthest_cell(maze: Maze, start: Cell) -> Tuple[Cell, int]:
+    dist = bfs_distances(maze, start)
+    cell = max(dist, key=dist.get)
+    return cell, dist[cell]
+def choose_far_apart_pair(maze: Maze) -> Tuple[Cell, Cell, int]:
+    start0 = (random.randrange(maze.width), random.randrange(maze.height))
+    a, _ = farthest_cell(maze, start0)
+    b, d = farthest_cell(maze, a)
+    return a, b, d
+def reconstruct_path(parent: Dict[Cell, Cell], start: Cell, goal: Cell) -> List[Cell]:
+    if goal not in parent and goal != start:
+        return []
+    path = [goal]
+    c = goal
+    while c != start:
+        c = parent[c]
+        path.append(c)
+    path.reverse()
+    return path
+def main():
+    pygame.init()
+    MARGIN = 16
+    screen_w = CELLS_W * CELL_SIZE + MARGIN * 2
+    screen_h = CELLS_H * CELL_SIZE + MARGIN * 2
+    screen = pygame.display.set_mode((screen_w, screen_h))
+    pygame.display.set_caption("Maze (Dijkstra Simulation)")
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
+    complexity_levels = [
+        dict(name="perfect", newest=0.95, loop=0.00, junction=0.00, braid=0.00),
+        dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08, braid=0.01),
+        dict(name="harder", newest=0.92, loop=0.20, junction=0.12, braid=0.01),
+        dict(name="extreme", newest=0.94, loop=0.28, junction=0.18, braid=0.02),
+        dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
+    ]
+    complexity_idx = 0
+    EXP_RATE_SLOW = 500
+    EXP_RATE_FAST = 5000
+    exp_rate = EXP_RATE_SLOW
+    AUTO_START = True
+    BOT_SPEED_CELLS_PER_SEC = 8.0
+    def cell_center_px(cell: Cell) -> Tuple[float, float]:
+        x, y = cell
+        return (MARGIN + x * CELL_SIZE + CELL_SIZE / 2, MARGIN + y * CELL_SIZE + CELL_SIZE / 2)
+    def build_maze_and_positions():
+        level = complexity_levels[complexity_idx]
+        m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
+        m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.6)
+        m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
+        m.braid_dead_ends(braid_prob=level['braid'])
+        s, g, dist = choose_far_apart_pair(m)
+        return m, s, g, level, dist
+    maze, start, goal, level, dist_sg = build_maze_and_positions()
+    state = "idle"
+    open_heap: List[Tuple[float, int, Cell]] = []
+    in_open: Set[Cell] = set()
+    closed: Set[Cell] = set()
+    g: Dict[Cell, float] = {}
+    parent: Dict[Cell, Cell] = {}
+    tie = 0
+    path: List[Cell] = []
+    path_set: Set[Cell] = set()
+    search_started = False
+    search_start_time = 0.0
+    search_end_time = 0.0
+    search_time = 0.0
+    traverse_started = False
+    traverse_start_time = 0.0
+    traverse_end_time = 0.0
+    traverse_time = 0.0
+    bot_idx = 0
+    bot_px, bot_py = cell_center_px(start)
+    target_px, target_py = bot_px, bot_py
+    moving = False
+    exp_budget = 0.0
+    def set_caption(phase: str):
+        title = (
+            f"Dijkstra | {level['name']} | {CELLS_W}x{CELLS_H} | "
+            f"newest={level['newest']:.2f} loops={level['loop']:.2f} "
+            f"junction={level['junction']:.2f} braid={level['braid']:.2f} | "
+            f"start→goal={dist_sg} | {phase.upper()}"
+        )
+        pygame.display.set_caption(title)
+    def start_search():
+        nonlocal open_heap, in_open, closed, g, parent, tie
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal path, path_set, state
+        open_heap.clear()
+        in_open.clear()
+        closed.clear()
+        g.clear()
+        parent.clear()
+        path.clear()
+        path_set.clear()
+        tie = 0
+        g[start] = 0.0
+        heapq.heappush(open_heap, (0.0, tie, start))
+        in_open.add(start)
+        search_started = True
+        search_start_time = time.perf_counter()
+        search_end_time = 0.0
+        search_time = 0.0
+        state = "searching"
+        set_caption("searching")
+    def start_traversal():
+        nonlocal bot_idx, bot_px, bot_py, target_px, target_py, moving
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time, state
+        if not path:
+            return
+        bot_idx = 0
+        bot_px, bot_py = cell_center_px(path[0])
+        if len(path) > 1:
+            target_px, target_py = cell_center_px(path[1])
+            moving = True
+        else:
+            moving = False
+        traverse_started = True
+        traverse_start_time = time.perf_counter()
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        state = "traversing"
+        set_caption("traversing")
+    def regenerate():
+        nonlocal maze, start, goal, level, dist_sg
+        nonlocal state, open_heap, in_open, closed, g, parent, path, path_set, tie
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time
+        nonlocal bot_px, bot_py, target_px, target_py, moving
+        nonlocal exp_budget
+        maze, start, goal, level, dist_sg = build_maze_and_positions()
+        state = "idle"
+        open_heap.clear()
+        in_open.clear()
+        closed.clear()
+        g.clear()
+        parent.clear()
+        tie = 0
+        path.clear()
+        path_set.clear()
+        search_started = False
+        search_start_time = 0.0
+        search_end_time = 0.0
+        search_time = 0.0
+        traverse_started = False
+        traverse_start_time = 0.0
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        bot_px, bot_py = cell_center_px(start)
+        target_px, target_py = bot_px, bot_py
+        moving = False
+        exp_budget = 0.0
+        set_caption("idle")
+        if AUTO_START:
+            start_search()
+    def draw():
+        screen.fill(BG_COLOR)
+        cs = CELL_SIZE
+        m = MARGIN
+        for y in range(CELLS_H + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m, m + y * cs), (m + CELLS_W * cs, m + y * cs), 1)
+        for x in range(CELLS_W + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m + x * cs, m), (m + x * cs, m + CELLS_H * cs), 1)
+        for y in range(maze.height):
+            for x in range(maze.width):
+                cx = m + x * cs
+                cy = m + y * cs
+                walls = maze.grid[y][x]
+                if walls['N']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx + cs, cy), 3)
+                if walls['S']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy + cs), (cx + cs, cy + cs), 3)
+                if walls['W']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx, cy + cs), 3)
+                if walls['E']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx + cs, cy), (cx + cs, cy + cs), 3)
+        pad = 5
+        if state in ("searching",):
+            for (x, y) in closed:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, CLOSED_COLOR, rect, border_radius=6)
+            for (x, y) in in_open:
+                if (x, y) in closed:
+                    continue
+                rect = pygame.Rect(m + x * cs + pad + 3, m + y * cs + pad + 3, cs - 2 * pad - 6, cs - 2 * pad - 6)
+                pygame.draw.rect(screen, OPEN_COLOR, rect, border_radius=6)
+        if state in ("cleaning", "traversing", "done") and path_set:
+            for (x, y) in path_set:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, PATH_COLOR, rect, border_radius=6)
+        sx, sy = start
+        gx, gy = goal
+        srect = pygame.Rect(m + sx * cs + 6, m + sy * cs + 6, cs - 12, cs - 12)
+        grect = pygame.Rect(m + gx * cs + 6, m + gy * cs + 6, cs - 12, cs - 12)
+        pygame.draw.rect(screen, START_COLOR, srect, border_radius=4)
+        pygame.draw.rect(screen, GOAL_COLOR, grect, border_radius=4)
+        if state in ("traversing", "done"):
+            pygame.draw.circle(screen, BOT_COLOR, (int(bot_px), int(bot_py)), int(cs * 0.30))
+        if search_started and search_end_time == 0.0:
+            cur = time.perf_counter() - search_start_time
+            search_text = f"Search: {cur:.3f} s"
+        else:
+            search_text = f"Search: {search_time:.3f} s"
+        if traverse_started and traverse_end_time == 0.0:
+            cur = time.perf_counter() - traverse_start_time
+            traverse_text = f"Traverse: {cur:.3f} s"
+            total_text = f"Total: {(search_time + cur):.3f} s"
+        else:
+            traverse_text = f"Traverse: {traverse_time:.3f} s"
+            total_text = f"Total: {(search_time + traverse_time):.3f} s"
+        t1 = font.render(search_text, True, (255, 255, 0))
+        t2 = font.render(traverse_text, True, (255, 255, 0))
+        t3 = font.render(total_text, True, (255, 255, 255))
+        hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle speed | ESC=quit", True, (200, 200, 200))
+        meta = font.render(f"exp/s={exp_rate}", True, (180, 180, 180))
+        screen.blit(t1, (MARGIN, MARGIN - 8))
+        screen.blit(t2, (MARGIN + 200, MARGIN - 8))
+        screen.blit(t3, (MARGIN + 420, MARGIN - 8))
+        screen.blit(meta, (MARGIN, MARGIN + 14))
+        screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
+        pygame.display.flip()
+    def finish_search(found: bool):
+        nonlocal search_end_time, search_time, path, path_set, state, in_open, closed
+        search_end_time = time.perf_counter()
+        search_time = search_end_time - search_start_time
+        if found:
+            p = reconstruct_path(parent, start, goal)
+            path[:] = p
+            path_set = set(p)
+        else:
+            path[:] = []
+            path_set = set()
+        in_open.clear()
+        closed.clear()
+        state = "cleaning"
+    regenerate()
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE,):
+                    running = False
+                elif event.key == pygame.K_SPACE:
+                    if state == "idle":
+                        start_search()
+                elif event.key == pygame.K_r:
+                    regenerate()
+                elif event.key == pygame.K_c:
+                    complexity_idx = (complexity_idx + 1) % len(complexity_levels)
+                    regenerate()
+                elif event.key == pygame.K_f:
+                    exp_rate = EXP_RATE_FAST if exp_rate == EXP_RATE_SLOW else EXP_RATE_SLOW
+        if state == "searching":
+            exp_budget += exp_rate * dt
+            steps = int(exp_budget)
+            if steps > 0:
+                exp_budget -= steps
+            found = False
+            for _ in range(steps):
+                if not open_heap:
+                    finish_search(False)
+                    break
+                fcost, _, current = heapq.heappop(open_heap)
+                if current in closed:
+                    continue
+                in_open.discard(current)
+                closed.add(current)
+                if current == goal:
+                    found = True
+                    break
+                for n in maze.neighbors(current):
+                    tent_g = g[current] + 1.0
+                    if n in closed and tent_g >= g.get(n, float("inf")):
+                        continue
+                    if tent_g < g.get(n, float("inf")):
+                        parent[n] = current
+                        g[n] = tent_g
+                        tie += 1
+                        heapq.heappush(open_heap, (tent_g, tie, n))
+                        in_open.add(n)
+            if found:
+                finish_search(True)
+        if state == "cleaning":
+            start_traversal()
+        if state == "traversing" and path:
+            speed_px = BOT_SPEED_CELLS_PER_SEC * CELL_SIZE
+            if moving:
+                dx = target_px - bot_px
+                dy = target_py - bot_py
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist > 0:
+                    step = speed_px * dt
+                    if step >= dist:
+                        bot_px, bot_py = target_px, target_py
+                    else:
+                        bot_px += dx / dist * step
+                        bot_py += dy / dist * step
+                arrived = abs(bot_px - target_px) < 0.5 and abs(bot_py - target_py) < 0.5
+                if arrived:
+                    bot_idx += 1
+                    if bot_idx >= len(path) - 1:
+                        moving = False
+                        traverse_end_time = time.perf_counter()
+                        traverse_time = traverse_end_time - traverse_start_time
+                        state = "done"
+                        set_caption("done")
+                    else:
+                        target_px, target_py = cell_center_px(path[bot_idx + 1])
+        draw()
+    pygame.quit()
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="Astart.py">
+import pygame
+import random
+import time
+import heapq
+from typing import Dict, List, Tuple, Optional, Set
+from Maze import Maze
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR
+Cell = Tuple[int, int]
+OPEN_COLOR = (80, 220, 140)
+CLOSED_COLOR = (80, 160, 255)
+PATH_COLOR = (255, 215, 0)
+BOT_COLOR = (255, 255, 255)
+def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
+    from collections import deque
+    dist = {start: 0}
+    q = deque([start])
+    while q:
+        c = q.popleft()
+        for n in maze.neighbors(c):
+            if n not in dist:
+                dist[n] = dist[c] + 1
+                q.append(n)
+    return dist
+def farthest_cell(maze: Maze, start: Cell) -> Tuple[Cell, int]:
+    dist = bfs_distances(maze, start)
+    cell = max(dist, key=dist.get)
+    return cell, dist[cell]
+def choose_far_apart_pair(maze: Maze) -> Tuple[Cell, Cell, int]:
+    start0 = (random.randrange(maze.width), random.randrange(maze.height))
+    a, _ = farthest_cell(maze, start0)
+    b, d = farthest_cell(maze, a)
+    return a, b, d
+def reconstruct_path(parent: Dict[Cell, Cell], start: Cell, goal: Cell) -> List[Cell]:
+    if goal not in parent and goal != start:
+        return []
+    path = [goal]
+    c = goal
+    while c != start:
+        c = parent[c]
+        path.append(c)
+    path.reverse()
+    return path
+def manhattan(a: Cell, b: Cell) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+def main():
+    pygame.init()
+    MARGIN = 16
+    screen_w = CELLS_W * CELL_SIZE + MARGIN * 2
+    screen_h = CELLS_H * CELL_SIZE + MARGIN * 2
+    screen = pygame.display.set_mode((screen_w, screen_h))
+    pygame.display.set_caption("Maze (A* Simulation)")
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
+    complexity_levels = [
+        dict(name="perfect", newest=0.95, loop=0.00, junction=0.00, braid=0.00),
+        dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08, braid=0.01),
+        dict(name="harder", newest=0.92, loop=0.20, junction=0.12, braid=0.01),
+        dict(name="extreme", newest=0.94, loop=0.28, junction=0.18, braid=0.02),
+        dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
+    ]
+    complexity_idx = 0
+    EXP_RATE_SLOW = 500
+    EXP_RATE_FAST = 5000
+    exp_rate = EXP_RATE_SLOW
+    HEURISTIC_WEIGHT = 1.0
+    AUTO_START = True
+    BOT_SPEED_CELLS_PER_SEC = 8.0
+    def cell_center_px(cell: Cell) -> Tuple[float, float]:
+        x, y = cell
+        return (MARGIN + x * CELL_SIZE + CELL_SIZE / 2, MARGIN + y * CELL_SIZE + CELL_SIZE / 2)
+    def build_maze_and_positions():
+        level = complexity_levels[complexity_idx]
+        m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
+        m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.6)
+        m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
+        m.braid_dead_ends(braid_prob=level['braid'])
+        s, g, dist = choose_far_apart_pair(m)
+        return m, s, g, level, dist
+    maze, start, goal, level, dist_sg = build_maze_and_positions()
+    state = "idle"
+    open_heap: List[Tuple[float, int, Cell]] = []
+    in_open: Set[Cell] = set()
+    closed: Set[Cell] = set()
+    g: Dict[Cell, float] = {}
+    parent: Dict[Cell, Cell] = {}
+    tie = 0
+    path: List[Cell] = []
+    path_set: Set[Cell] = set()
+    search_started = False
+    search_start_time = 0.0
+    search_end_time = 0.0
+    search_time = 0.0
+    traverse_started = False
+    traverse_start_time = 0.0
+    traverse_end_time = 0.0
+    traverse_time = 0.0
+    bot_idx = 0
+    bot_px, bot_py = cell_center_px(start)
+    target_px, target_py = bot_px, bot_py
+    moving = False
+    exp_budget = 0.0
+    def set_caption(phase: str):
+        title = (
+            f"A* | {level['name']} | {CELLS_W}x{CELLS_H} | "
+            f"newest={level['newest']:.2f} loops={level['loop']:.2f} "
+            f"junction={level['junction']:.2f} braid={level['braid']:.2f} | "
+            f"hW={HEURISTIC_WEIGHT:.2f} | start→goal={dist_sg} | {phase.upper()}"
+        )
+        pygame.display.set_caption(title)
+    def start_search():
+        nonlocal open_heap, in_open, closed, g, parent, tie
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal path, path_set, state
+        open_heap.clear()
+        in_open.clear()
+        closed.clear()
+        g.clear()
+        parent.clear()
+        path.clear()
+        path_set.clear()
+        tie = 0
+        g[start] = 0.0
+        f0 = HEURISTIC_WEIGHT * manhattan(start, goal)
+        heapq.heappush(open_heap, (f0, tie, start))
+        in_open.add(start)
+        search_started = True
+        search_start_time = time.perf_counter()
+        search_end_time = 0.0
+        search_time = 0.0
+        state = "searching"
+        set_caption("searching")
+    def start_traversal():
+        nonlocal bot_idx, bot_px, bot_py, target_px, target_py, moving
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time, state
+        if not path:
+            return
+        bot_idx = 0
+        bot_px, bot_py = cell_center_px(path[0])
+        if len(path) > 1:
+            target_px, target_py = cell_center_px(path[1])
+            moving = True
+        else:
+            moving = False
+        traverse_started = True
+        traverse_start_time = time.perf_counter()
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        state = "traversing"
+        set_caption("traversing")
+    def regenerate():
+        nonlocal maze, start, goal, level, dist_sg
+        nonlocal state, open_heap, in_open, closed, g, parent, path, path_set, tie
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time
+        nonlocal bot_px, bot_py, target_px, target_py, moving
+        nonlocal exp_budget
+        maze, start, goal, level, dist_sg = build_maze_and_positions()
+        state = "idle"
+        open_heap.clear()
+        in_open.clear()
+        closed.clear()
+        g.clear()
+        parent.clear()
+        tie = 0
+        path.clear()
+        path_set.clear()
+        search_started = False
+        search_start_time = 0.0
+        search_end_time = 0.0
+        search_time = 0.0
+        traverse_started = False
+        traverse_start_time = 0.0
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        bot_px, bot_py = cell_center_px(start)
+        target_px, target_py = bot_px, bot_py
+        moving = False
+        exp_budget = 0.0
+        set_caption("idle")
+        if AUTO_START:
+            start_search()
+    def draw():
+        screen.fill(BG_COLOR)
+        cs = CELL_SIZE
+        m = MARGIN
+        for y in range(CELLS_H + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m, m + y * cs), (m + CELLS_W * cs, m + y * cs), 1)
+        for x in range(CELLS_W + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m + x * cs, m), (m + x * cs, m + CELLS_H * cs), 1)
+        for y in range(maze.height):
+            for x in range(maze.width):
+                cx = m + x * cs
+                cy = m + y * cs
+                walls = maze.grid[y][x]
+                if walls['N']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx + cs, cy), 3)
+                if walls['S']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy + cs), (cx + cs, cy + cs), 3)
+                if walls['W']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx, cy + cs), 3)
+                if walls['E']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx + cs, cy), (cx + cs, cy + cs), 3)
+        pad = 5
+        if state in ("searching",):
+            for (x, y) in closed:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, CLOSED_COLOR, rect, border_radius=6)
+            for (x, y) in in_open:
+                if (x, y) in closed:
+                    continue
+                rect = pygame.Rect(m + x * cs + pad + 3, m + y * cs + pad + 3, cs - 2 * pad - 6, cs - 2 * pad - 6)
+                pygame.draw.rect(screen, OPEN_COLOR, rect, border_radius=6)
+        if state in ("cleaning", "traversing", "done") and path_set:
+            for (x, y) in path_set:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, PATH_COLOR, rect, border_radius=6)
+        sx, sy = start
+        gx, gy = goal
+        srect = pygame.Rect(m + sx * cs + 6, m + sy * cs + 6, cs - 12, cs - 12)
+        grect = pygame.Rect(m + gx * cs + 6, m + gy * cs + 6, cs - 12, cs - 12)
+        pygame.draw.rect(screen, START_COLOR, srect, border_radius=4)
+        pygame.draw.rect(screen, GOAL_COLOR, grect, border_radius=4)
+        if state in ("traversing", "done"):
+            pygame.draw.circle(screen, BOT_COLOR, (int(bot_px), int(bot_py)), int(cs * 0.30))
+        if search_started and search_end_time == 0.0:
+            cur = time.perf_counter() - search_start_time
+            search_text = f"Search: {cur:.3f} s"
+        else:
+            search_text = f"Search: {search_time:.3f} s"
+        if traverse_started and traverse_end_time == 0.0:
+            cur = time.perf_counter() - traverse_start_time
+            traverse_text = f"Traverse: {cur:.3f} s"
+            total_text = f"Total: {(search_time + cur):.3f} s"
+        else:
+            traverse_text = f"Traverse: {traverse_time:.3f} s"
+            total_text = f"Total: {(search_time + traverse_time):.3f} s"
+        t1 = font.render(search_text, True, (255, 255, 0))
+        t2 = font.render(traverse_text, True, (255, 255, 0))
+        t3 = font.render(total_text, True, (255, 255, 255))
+        hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle speed | H=toggle A*/Dijkstra | ESC=quit", True, (200, 200, 200))
+        meta = font.render(f"exp/s={exp_rate}  hW={HEURISTIC_WEIGHT:.2f}", True, (180, 180, 180))
+        screen.blit(t1, (MARGIN, MARGIN - 8))
+        screen.blit(t2, (MARGIN + 200, MARGIN - 8))
+        screen.blit(t3, (MARGIN + 420, MARGIN - 8))
+        screen.blit(meta, (MARGIN, MARGIN + 14))
+        screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
+        pygame.display.flip()
+    def finish_search(found: bool):
+        nonlocal search_end_time, search_time, path, path_set, state
+        search_end_time = time.perf_counter()
+        search_time = search_end_time - search_start_time
+        if found:
+            p = reconstruct_path(parent, start, goal)
+            path[:] = p
+            path_set = set(p)
+        else:
+            path[:] = []
+            path_set = set()
+        in_open.clear()
+        closed.clear()
+        state = "cleaning"
+    regenerate()
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE,):
+                    running = False
+                elif event.key == pygame.K_SPACE:
+                    if state == "idle":
+                        start_search()
+                elif event.key == pygame.K_r:
+                    regenerate()
+                elif event.key == pygame.K_c:
+                    complexity_idx = (complexity_idx + 1) % len(complexity_levels)
+                    regenerate()
+                elif event.key == pygame.K_f:
+                    exp_rate = EXP_RATE_FAST if exp_rate == EXP_RATE_SLOW else EXP_RATE_SLOW
+                elif event.key == pygame.K_h:
+                    HEURISTIC_WEIGHT = 0.0 if HEURISTIC_WEIGHT > 0.0 else 1.0
+                    set_caption(state)
+        if state == "searching":
+            exp_budget += exp_rate * dt
+            steps = int(exp_budget)
+            if steps > 0:
+                exp_budget -= steps
+            found = False
+            for _ in range(steps):
+                if not open_heap:
+                    finish_search(False)
+                    break
+                f, _, current = heapq.heappop(open_heap)
+                if current in closed:
+                    continue
+                if current in in_open:
+                    in_open.discard(current)
+                closed.add(current)
+                if current == goal:
+                    found = True
+                    break
+                for n in maze.neighbors(current):
+                    tent_g = g[current] + 1.0
+                    if n in closed and tent_g >= g.get(n, float("inf")):
+                        continue
+                    if tent_g < g.get(n, float("inf")):
+                        parent[n] = current
+                        g[n] = tent_g
+                        tie += 1
+                        f_n = tent_g + HEURISTIC_WEIGHT * manhattan(n, goal)
+                        heapq.heappush(open_heap, (f_n, tie, n))
+                        in_open.add(n)
+            if found:
+                finish_search(True)
+        if state == "cleaning":
+            start_traversal()
+        if state == "traversing" and path:
+            speed_px = BOT_SPEED_CELLS_PER_SEC * CELL_SIZE
+            if moving:
+                dx = target_px - bot_px
+                dy = target_py - bot_py
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist > 0:
+                    step = speed_px * dt
+                    if step >= dist:
+                        bot_px, bot_py = target_px, target_py
+                    else:
+                        bot_px += dx / dist * step
+                        bot_py += dy / dist * step
+                arrived = abs(bot_px - target_px) < 0.5 and abs(bot_py - target_py) < 0.5
+                if arrived:
+                    bot_idx += 1
+                    if bot_idx >= len(path) - 1:
+                        moving = False
+                        traverse_end_time = time.perf_counter()
+                        traverse_time = traverse_end_time - traverse_start_time
+                        state = "done"
+                        set_caption("done")
+                    else:
+                        target_px, target_py = cell_center_px(path[bot_idx + 1])
+        draw()
+    pygame.quit()
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="config.py">
+CELLS_W = 40
+CELLS_H = 40
+CELL_SIZE = 16
+BG_COLOR = (28, 28, 32)
+WALL_COLOR = (240, 90, 90)
+GRID_COLOR = (60, 60, 70)
+START_COLOR = (70, 200, 110)
+GOAL_COLOR = (245, 210, 90)
+PLAYER_COLOR = (220, 220, 255)
+</file>
+
+<file path=".repomixignore">
+__pycache__
+venv311
+.gitignore
+</file>
+
+<file path="FloodFill.py">
+import pygame
+import random
+import time
+from collections import deque
+from typing import Dict, List, Tuple, Optional, Set
+from Maze import Maze
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR, PLAYER_COLOR
+Cell = Tuple[int, int]
+WATER_COLOR = (80, 160, 255)
+PATH_COLOR = (255, 215, 0)
+BOT_COLOR = (255, 255, 255)
+def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
+    dist = {start: 0}
+    q = deque([start])
+    while q:
+        c = q.popleft()
+        for n in maze.neighbors(c):
+            if n not in dist:
+                dist[n] = dist[c] + 1
+                q.append(n)
+    return dist
+def farthest_cell(maze: Maze, start: Cell) -> Tuple[Cell, int]:
+    dist = bfs_distances(maze, start)
+    cell = max(dist, key=dist.get)
+    return cell, dist[cell]
+def choose_far_apart_pair(maze: Maze) -> Tuple[Cell, Cell, int]:
+    start0 = (random.randrange(maze.width), random.randrange(maze.height))
+    a, _ = farthest_cell(maze, start0)
+    b, d = farthest_cell(maze, a)
+    return a, b, d
+def reconstruct_path(parent: Dict[Cell, Cell], start: Cell, goal: Cell) -> List[Cell]:
+    if goal not in parent and goal != start:
+        return []
+    path = [goal]
+    c = goal
+    while c != start:
+        c = parent[c]
+        path.append(c)
+    path.reverse()
+    return path
+def main():
+    pygame.init()
+    MARGIN = 16
+    screen_w = CELLS_W * CELL_SIZE + MARGIN * 2
+    screen_h = CELLS_H * CELL_SIZE + MARGIN * 2
+    screen = pygame.display.set_mode((screen_w, screen_h))
+    pygame.display.set_caption('Maze (Flood Fill Simulation)')
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
+    BFS_RATE_SLOW = 500
+    BFS_RATE_FAST = 4000
+    bfs_rate = BFS_RATE_SLOW
+    BOT_SPEED_CELLS_PER_SEC = 8.0
+    AUTO_START = True
+    complexity_levels = [
+        dict(name="perfect", newest=0.95, loop=0.00, junction=0.00, braid=0.00),
+        dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08, braid=0.01),
+        dict(name="harder", newest=0.92, loop=0.20, junction=0.12, braid=0.01),
+        dict(name="extreme", newest=0.94, loop=0.28, junction=0.18, braid=0.02),
+        dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
+    ]
+    complexity_idx = 0
+    def cell_center_px(cell: Cell) -> Tuple[float, float]:
+        x, y = cell
+        return (MARGIN + x * CELL_SIZE + CELL_SIZE / 2, MARGIN + y * CELL_SIZE + CELL_SIZE / 2)
+    def build_maze_and_positions():
+        level = complexity_levels[complexity_idx]
+        m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
+        m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.6)
+        m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
+        m.braid_dead_ends(braid_prob=level['braid'])
+        s, g, dist = choose_far_apart_pair(m)
+        return m, s, g, level, dist
+    maze, start, goal, level, dist_sg = build_maze_and_positions()
+    state = "idle"
+    visited: Set[Cell] = set()
+    parent: Dict[Cell, Cell] = {}
+    q: deque[Cell] = deque()
+    frontier: Set[Cell] = set()
+    path: List[Cell] = []
+    path_set: Set[Cell] = set()
+    search_started = False
+    search_start_time = 0.0
+    search_end_time = 0.0
+    search_time = 0.0
+    traverse_started = False
+    traverse_start_time = 0.0
+    traverse_end_time = 0.0
+    traverse_time = 0.0
+    bot_cell_index = 0
+    bot_px, bot_py = cell_center_px(start)
+    target_px, target_py = bot_px, bot_py
+    moving = False
+    bfs_budget = 0.0
+    def start_search():
+        nonlocal state, visited, parent, q, frontier
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal path, path_set
+        visited.clear()
+        parent.clear()
+        q.clear()
+        frontier.clear()
+        path.clear()
+        path_set.clear()
+        q.append(start)
+        visited.add(start)
+        frontier.add(start)
+        search_started = True
+        search_start_time = time.perf_counter()
+        search_end_time = 0.0
+        search_time = 0.0
+        set_caption("searching")
+        return
+    def start_traversal():
+        nonlocal state, bot_cell_index, bot_px, bot_py, target_px, target_py
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time, moving
+        if not path:
+            return
+        bot_cell_index = 0
+        bot_px, bot_py = cell_center_px(path[0])
+        if len(path) > 1:
+            target_px, target_py = cell_center_px(path[1])
+            moving = True
+        else:
+            moving = False
+        traverse_started = True
+        traverse_start_time = time.perf_counter()
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        state = "traversing"
+        set_caption("traversing")
+    def set_caption(phase: str):
+        title = (
+            f"Flood Fill | {level['name']} | {CELLS_W}x{CELLS_H} | "
+            f"newest={level['newest']:.2f} loops={level['loop']:.2f} "
+            f"junction={level['junction']:.2f} braid={level['braid']:.2f} | "
+            f"start→goal={dist_sg} | {phase.upper()}"
+        )
+        pygame.display.set_caption(title)
+    def draw():
+        screen.fill(BG_COLOR)
+        cs = CELL_SIZE
+        m = MARGIN
+        for y in range(CELLS_H + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m, m + y * cs), (m + CELLS_W * cs, m + y * cs), 1)
+        for x in range(CELLS_W + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m + x * cs, m), (m + x * cs, m + CELLS_H * cs), 1)
+        for y in range(maze.height):
+            for x in range(maze.width):
+                cx = m + x * cs
+                cy = m + y * cs
+                walls = maze.grid[y][x]
+                if walls['N']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx + cs, cy), 3)
+                if walls['S']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy + cs), (cx + cs, cy + cs), 3)
+                if walls['W']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx, cy + cs), 3)
+                if walls['E']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx + cs, cy), (cx + cs, cy + cs), 3)
+        if state in ("searching", "cleaning", "traversing", "done"):
+            draw_set: Set[Cell]
+            if path_set:
+                draw_set = path_set
+                color = PATH_COLOR
+            else:
+                draw_set = visited
+                color = WATER_COLOR
+            pad = 5
+            for (x, y) in draw_set:
+                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
+                pygame.draw.rect(screen, color, rect, border_radius=6)
+        sx, sy = start
+        gx, gy = goal
+        srect = pygame.Rect(m + sx * cs + 6, m + sy * cs + 6, cs - 12, cs - 12)
+        grect = pygame.Rect(m + gx * cs + 6, m + gy * cs + 6, cs - 12, cs - 12)
+        pygame.draw.rect(screen, START_COLOR, srect, border_radius=4)
+        pygame.draw.rect(screen, GOAL_COLOR, grect, border_radius=4)
+        if state in ("traversing", "done"):
+            pygame.draw.circle(screen, BOT_COLOR, (int(bot_px), int(bot_py)), int(cs * 0.30))
+        if search_started and search_end_time == 0.0:
+            cur = time.perf_counter() - search_start_time
+            search_text = f"Search: {cur:.3f} s"
+        else:
+            search_text = f"Search: {search_time:.3f} s"
+        if traverse_started and traverse_end_time == 0.0:
+            cur = time.perf_counter() - traverse_start_time
+            traverse_text = f"Traverse: {cur:.3f} s"
+            total_text = f"Total: {(search_time + cur):.3f} s"
+        else:
+            traverse_text = f"Traverse: {traverse_time:.3f} s"
+            total_text = f"Total: {(search_time + traverse_time):.3f} s"
+        t1 = font.render(search_text, True, (255, 255, 0))
+        t2 = font.render(traverse_text, True, (255, 255, 0))
+        t3 = font.render(total_text, True, (255, 255, 255))
+        hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle BFS speed | ESC=quit", True, (200, 200, 200))
+        screen.blit(t1, (MARGIN, MARGIN - 8))
+        screen.blit(t2, (MARGIN + 200, MARGIN - 8))
+        screen.blit(t3, (MARGIN + 420, MARGIN - 8))
+        screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
+        pygame.display.flip()
+    def regenerate():
+        nonlocal maze, start, goal, level, dist_sg
+        nonlocal state, visited, parent, q, frontier, path, path_set
+        nonlocal search_started, search_start_time, search_end_time, search_time
+        nonlocal traverse_started, traverse_start_time, traverse_end_time, traverse_time
+        nonlocal bot_px, bot_py, target_px, target_py, moving
+        nonlocal bfs_budget
+        maze, start, goal, level, dist_sg = build_maze_and_positions()
+        state = "idle"
+        visited.clear()
+        parent.clear()
+        q.clear()
+        frontier.clear()
+        path.clear()
+        path_set.clear()
+        search_started = False
+        search_start_time = 0.0
+        search_end_time = 0.0
+        search_time = 0.0
+        traverse_started = False
+        traverse_start_time = 0.0
+        traverse_end_time = 0.0
+        traverse_time = 0.0
+        bot_px, bot_py = cell_center_px(start)
+        target_px, target_py = bot_px, bot_py
+        moving = False
+        bfs_budget = 0.0
+        set_caption("idle")
+        if AUTO_START:
+            start_search()
+            state = "searching"
+    regenerate()
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE,):
+                    running = False
+                elif event.key == pygame.K_SPACE:
+                    if state == "idle":
+                        start_search()
+                        state = "searching"
+                elif event.key == pygame.K_r:
+                    regenerate()
+                elif event.key == pygame.K_c:
+                    complexity_idx = (complexity_idx + 1) % len(complexity_levels)
+                    regenerate()
+                elif event.key == pygame.K_f:
+                    if bfs_rate == BFS_RATE_SLOW:
+                        bfs_rate = BFS_RATE_FAST
+                    else:
+                        bfs_rate = BFS_RATE_SLOW
+        if state == "searching":
+            bfs_budget += bfs_rate * dt
+            steps = int(bfs_budget)
+            if steps > 0:
+                bfs_budget -= steps
+            found = False
+            for _ in range(steps):
+                if not q:
+                    break
+                c = q.popleft()
+                frontier.discard(c)
+                for n in maze.neighbors(c):
+                    if n not in visited:
+                        visited.add(n)
+                        parent[n] = c
+                        q.append(n)
+                        frontier.add(n)
+                        if n == goal:
+                            found = True
+                            break
+                if found:
+                    break
+            if found or (goal in visited):
+                search_end_time = time.perf_counter()
+                search_time = search_end_time - search_start_time
+                p = reconstruct_path(parent, start, goal)
+                if p:
+                    path[:] = p
+                    path_set = set(p)
+                else:
+                    path[:] = []
+                    path_set = set()
+                # clear all non-path blue cells (keep only the correct path)
+                visited.clear()
+                visited |= path_set
+                # move on to traversal
+                state = "cleaning"
+        if state == "cleaning":
+            # Small visual breath is optional; we can jump straight into traversal
+            start_traversal()
+        # Move bot along the path
+        if state == "traversing" and path:
+            speed_px = BOT_SPEED_CELLS_PER_SEC * CELL_SIZE
+            if moving:
+                # Move towards target
+                dx = target_px - bot_px
+                dy = target_py - bot_py
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist < 1e-6:
+                    dist = 0.0
+                if dist > 0:
+                    step = speed_px * dt
+                    if step >= dist:
+                        bot_px, bot_py = target_px, target_py
+                    else:
+                        bot_px += dx / dist * step
+                        bot_py += dy / dist * step
+                arrived = abs(bot_px - target_px) < 0.5 and abs(bot_py - target_py) < 0.5
+                if arrived:
+                    # Advance to next cell
+                    bot_cell_index += 1
+                    if bot_cell_index >= len(path) - 1:
+                        # Arrived at final cell
+                        moving = False
+                        # end traversal timer
+                        traverse_end_time = time.perf_counter()
+                        traverse_time = traverse_end_time - traverse_start_time
+                        state = "done"
+                        set_caption("done")
+                    else:
+                        target_px, target_py = cell_center_px(path[bot_cell_index + 1])
+        draw()
+    pygame.quit()
+if __name__ == '__main__':
+    main()
+</file>
+
+<file path="Maze.py">
+import pygame
+import random
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional
+from collections import deque
+import math
+import time
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR, PLAYER_COLOR
+Cell = Tuple[int, int]
+DIRECTIONS = {
+    'N': (0, -1),
+    'S': (0, 1),
+    'E': (1, 0),
+    'W': (-1, 0),
+}
+DIR_ORDER = ['N', 'E', 'S', 'W']
+OPPOSITE = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
+@dataclass
+class Maze:
+    width: int
+    height: int
+    grid: List[List[Dict[str, bool]]] = field(init=False)
+    def __post_init__(self):
+        self.grid = [[{d: True for d in DIRECTIONS} for _ in range(self.width)] for _ in range(self.height)]
+    def in_bounds(self, cell: Cell) -> bool:
+        x, y = cell
+        return 0 <= x < self.width and 0 <= y < self.height
+    def carve(self, a: Cell, b: Cell):
+        ax, ay = a
+        bx, by = b
+        if bx == ax and by == ay - 1:
+            self.grid[ay][ax]['N'] = False
+            self.grid[by][bx]['S'] = False
+        elif bx == ax and by == ay + 1:
+            self.grid[ay][ax]['S'] = False
+            self.grid[by][bx]['N'] = False
+        elif bx == ax + 1 and by == ay:
+            self.grid[ay][ax]['E'] = False
+            self.grid[by][bx]['W'] = False
+        elif bx == ax - 1 and by == ay:
+            self.grid[ay][ax]['W'] = False
+            self.grid[by][bx]['E'] = False
+    def is_open(self, cell: Cell, direction: str) -> bool:
+        x, y = cell
+        return not self.grid[y][x][direction]
+    def neighbors(self, cell: Cell) -> List[Cell]:
+        x, y = cell
+        res = []
+        for d, (dx, dy) in DIRECTIONS.items():
+            nx_, ny_ = x + dx, y + dy
+            if 0 <= nx_ < self.width and 0 <= ny_ < self.height and not self.grid[y][x][d]:
+                res.append((nx_, ny_))
+        return res
+    def degree(self, cell: Cell) -> int:
+        x, y = cell
+        deg = 0
+        for d in DIRECTIONS:
+            if not self.grid[y][x][d]:
+                deg += 1
+        return deg
+    @staticmethod
+    def generate_growing_tree(width: int, height: int, newest_bias: float = 1.0, seed: Optional[int] = None) -> 'Maze':
+        if seed is not None:
+            random.seed(seed)
+        m = Maze(width, height)
+        visited = [[False] * width for _ in range(height)]
+        start = (random.randrange(width), random.randrange(height))
+        visited[start[1]][start[0]] = True
+        cells: List[Cell] = [start]
+        while cells:
+            if random.random() < newest_bias:
+                i = len(cells) - 1
+            else:
+                i = random.randrange(len(cells))
+            x, y = cells[i]
+            unvisited = []
+            for (dx, dy) in DIRECTIONS.values():
+                nx_, ny_ = x + dx, y + dy
+                if 0 <= nx_ < width and 0 <= ny_ < height and not visited[ny_][nx_]:
+                    unvisited.append((nx_, ny_))
+            if unvisited:
+                nx_, ny_ = random.choice(unvisited)
+                m.carve((x, y), (nx_, ny_))
+                visited[ny_][nx_] = True
+                cells.append((nx_, ny_))
+            else:
+                cells.pop(i)
+        return m
+    def add_loops_smart(self, loop_prob: float, avoid_dead_ends: bool = True, center_bias: float = 0.5):
+        if loop_prob <= 0:
+            return
+        cx = (self.width - 1) / 2.0
+        cy = (self.height - 1) / 2.0
+        maxr = max(cx, cy) + 1e-9
+        def center_weight(x: int, y: int) -> float:
+            r = math.hypot((x - cx) / maxr, (y - cy) / maxr)
+            return 1.0 + center_bias * (1.0 - min(r, 1.0))
+        for y in range(self.height):
+            for x in range(self.width):
+                for d in ('E', 'S'):
+                    if self.grid[y][x][d]:
+                        dx, dy = DIRECTIONS[d]
+                        nx_, ny_ = x + dx, y + dy
+                        if 0 <= nx_ < self.width and 0 <= ny_ < self.height:
+                            if avoid_dead_ends:
+                                if self.degree((x, y)) <= 1 or self.degree((nx_, ny_)) <= 1:
+                                    continue
+                            p = loop_prob * center_weight(x, y)
+                            if random.random() < p:
+                                self.carve((x, y), (nx_, ny_))
+    def enrich_junctions(self, prob: float, avoid_dead_ends: bool = True):
+        if prob <= 0:
+            return
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.degree((x, y)) == 2 and random.random() < prob:
+                    closed_dirs = [d for d in DIR_ORDER if self.grid[y][x][d]]
+                    random.shuffle(closed_dirs)
+                    for d in closed_dirs:
+                        dx, dy = DIRECTIONS[d]
+                        nx_, ny_ = x + dx, y + dy
+                        if 0 <= nx_ < self.width and 0 <= ny_ < self.height:
+                            if avoid_dead_ends and self.degree((nx_, ny_)) <= 1:
+                                continue
+                            self.carve((x, y), (nx_, ny_))
+                            break
+    def braid_dead_ends(self, braid_prob: float):
+        if braid_prob <= 0:
+            return
+        dead_ends = [(x, y) for y in range(self.height) for x in range(self.width)
+                     if len(self.neighbors((x, y))) == 1]
+        random.shuffle(dead_ends)
+        for (x, y) in dead_ends:
+            if random.random() < braid_prob:
+                closed_dirs = [d for d in DIR_ORDER if self.grid[y][x][d]]
+                random.shuffle(closed_dirs)
+                for d in closed_dirs:
+                    dx, dy = DIRECTIONS[d]
+                    nx_, ny_ = x + dx, y + dy
+                    if 0 <= nx_ < self.width and 0 <= ny_ < self.height:
+                        self.carve((x, y), (nx_, ny_))
+                        break
+def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
+    dist = {start: 0}
+    q = deque([start])
+    while q:
+        c = q.popleft()
+        for n in maze.neighbors(c):
+            if n not in dist:
+                dist[n] = dist[c] + 1
+                q.append(n)
+    return dist
+def farthest_cell(maze: Maze, start: Cell) -> Tuple[Cell, int]:
+    dist = bfs_distances(maze, start)
+    cell = max(dist, key=dist.get)
+    return cell, dist[cell]
+def choose_far_apart_pair(maze: Maze) -> Tuple[Cell, Cell, int]:
+    start0 = (random.randrange(maze.width), random.randrange(maze.height))
+    a, _ = farthest_cell(maze, start0)
+    b, d = farthest_cell(maze, a)
+    return a, b, d
+def maze_metrics(maze: Maze) -> Tuple[int, int, float]:
+    degs = [maze.degree((x, y)) for y in range(maze.height) for x in range(maze.width)]
+    dead_ends = sum(1 for d in degs if d == 1)
+    branching = sum(1 for d in degs if d >= 3)
+    avg_deg = sum(degs) / len(degs)
+    return dead_ends, branching, avg_deg
+def main():
+    MARGIN = 16
+    SPEED_CELLS_PER_SEC = 8.0
+    complexity_levels = [
+        dict(name="perfect", newest=0.95, loop=0.00, junction=0.00, braid=0.00),
+        dict(name="hard_branches", newest=0.90, loop=0.12, junction=0.08, braid=0.01),
+        dict(name="harder", newest=0.92, loop=0.20, junction=0.12, braid=0.01),
+        dict(name="extreme", newest=0.94, loop=0.28, junction=0.18, braid=0.02),
+        dict(name="insane", newest=0.95, loop=0.3, junction=0.25, braid=0.1),
+    ]
+    complexity_idx = 0
+    pygame.init()
+    screen_w = CELLS_W * CELL_SIZE + MARGIN * 2
+    screen_h = CELLS_H * CELL_SIZE + MARGIN * 2
+    screen = pygame.display.set_mode((screen_w, screen_h))
+    pygame.display.set_caption('Maze (Manual Control)')
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
+    def cell_center_px(cell: Cell) -> Tuple[int, int]:
+        x, y = cell
+        return int(MARGIN + x * CELL_SIZE + CELL_SIZE / 2), int(MARGIN + y * CELL_SIZE + CELL_SIZE / 2)
+    def build_maze_and_positions():
+        level = complexity_levels[complexity_idx]
+        m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
+        m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.6)
+        m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
+        m.braid_dead_ends(braid_prob=level['braid'])
+        s, g, dist = choose_far_apart_pair(m)
+        de, br, avgd = maze_metrics(m)
+        return m, s, g, dist, (de, br, avgd), level
+    maze, start, goal, dist_sg, (dead_ends, branch_nodes, avg_deg), level = build_maze_and_positions()
+    player_cell: Cell = start
+    player_px, player_py = cell_center_px(player_cell)
+    moving = False
+    move_dir: Optional[str] = None
+    target_cell: Optional[Cell] = None
+    target_px = target_py = 0
+    queued_dir: Optional[str] = None
+    won = False
+    timer_started = False
+    timer_start_time = 0.0
+    timer_end_time = 0.0
+    timer_elapsed = 0.0
+    def update_caption():
+        title = (
+            f"{level['name']} | {CELLS_W}x{CELLS_H} | "
+            f"newest={level['newest']:.2f} loops={level['loop']:.2f} "
+            f"junction={level['junction']:.2f} braid={level['braid']:.2f} | "
+            f"DE={dead_ends} branches={branch_nodes} avgDeg={avg_deg:.2f} | "
+            f"start→goal={dist_sg}"
+        )
+        if won:
+            title += " | GOAL! Press R"
+        pygame.display.set_caption(title)
+    def can_move(cell: Cell, d: str) -> bool:
+        return maze.is_open(cell, d)
+    def begin_move(d: str):
+        nonlocal moving, move_dir, target_cell, target_px, target_py, queued_dir
+        if not can_move(player_cell, d):
+            return
+        dx, dy = DIRECTIONS[d]
+        tc = (player_cell[0] + dx, player_cell[1] + dy)
+        if not maze.in_bounds(tc):
+            return
+        tpx, tpy = cell_center_px(tc)
+        moving = True
+        move_dir = d
+        target_cell = tc
+        target_px, target_py = tpx, tpy
+        if queued_dir == d:
+            queued_dir = None
+    def handle_idle_input():
+        nonlocal queued_dir
+        keys = pygame.key.get_pressed()
+        def dir_pressed(d: str) -> bool:
+            if d == 'N': return keys[pygame.K_UP] or keys[pygame.K_w]
+            if d == 'S': return keys[pygame.K_DOWN] or keys[pygame.K_s]
+            if d == 'W': return keys[pygame.K_LEFT] or keys[pygame.K_a]
+            if d == 'E': return keys[pygame.K_RIGHT] or keys[pygame.K_d]
+            return False
+        if queued_dir and can_move(player_cell, queued_dir):
+            begin_move(queued_dir)
+            return
+        for d in ['N', 'S', 'W', 'E']:
+            if dir_pressed(d) and can_move(player_cell, d):
+                begin_move(d)
+                return
+    def draw():
+        screen.fill(BG_COLOR)
+        cs = CELL_SIZE
+        m = MARGIN
+        for y in range(CELLS_H + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m, m + y * cs), (m + CELLS_W * cs, m + y * cs), 1)
+        for x in range(CELLS_W + 1):
+            pygame.draw.line(screen, GRID_COLOR, (m + x * cs, m), (m + x * cs, m + CELLS_H * cs), 1)
+        for y in range(maze.height):
+            for x in range(maze.width):
+                cx = m + x * cs
+                cy = m + y * cs
+                walls = maze.grid[y][x]
+                if walls['N']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx + cs, cy), 3)
+                if walls['S']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy + cs), (cx + cs, cy + cs), 3)
+                if walls['W']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx, cy), (cx, cy + cs), 3)
+                if walls['E']:
+                    pygame.draw.line(screen, WALL_COLOR, (cx + cs, cy), (cx + cs, cy + cs), 3)
+        sx, sy = start
+        gx, gy = goal
+        srect = pygame.Rect(m + sx * cs + 6, m + sy * cs + 6, cs - 12, cs - 12)
+        grect = pygame.Rect(m + gx * cs + 6, m + gy * cs + 6, cs - 12, cs - 12)
+        pygame.draw.rect(screen, START_COLOR, srect)
+        pygame.draw.rect(screen, GOAL_COLOR, grect)
+        pygame.draw.circle(screen, PLAYER_COLOR, (int(player_px), int(player_py)), int(cs * 0.35))
+        if timer_started:
+            elapsed = time.perf_counter() - timer_start_time
+        else:
+            elapsed = timer_elapsed if won else 0.0
+        timer_text = font.render(f"Time: {elapsed:.3f} s", True, (255, 255, 0))
+        screen.blit(timer_text, (MARGIN, MARGIN - 8))
+        if won:
+            text = font.render("Goal reached! Press R to regenerate", True, (255, 255, 255))
+            screen.blit(text, (m, screen_h - m - 24))
+        pygame.display.flip()
+    update_caption()
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000.0
+        speed_px = SPEED_CELLS_PER_SEC * CELL_SIZE
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_ESCAPE,):
+                    running = False
+                elif event.key in (pygame.K_UP, pygame.K_w):
+                    queued_dir = 'N'
+                    if not moving:
+                        begin_move('N')
+                elif event.key in (pygame.K_DOWN, pygame.K_s):
+                    queued_dir = 'S'
+                    if not moving:
+                        begin_move('S')
+                elif event.key in (pygame.K_LEFT, pygame.K_a):
+                    queued_dir = 'W'
+                    if not moving:
+                        begin_move('W')
+                elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                    queued_dir = 'E'
+                    if not moving:
+                        begin_move('E')
+                elif event.key == pygame.K_r:
+                    maze, start, goal, dist_sg, (dead_ends, branch_nodes, avg_deg), level = build_maze_and_positions()
+                    player_cell = start
+                    player_px, player_py = cell_center_px(player_cell)
+                    moving = False
+                    move_dir = None
+                    target_cell = None
+                    queued_dir = None
+                    won = False
+                    timer_started = False
+                    timer_start_time = 0.0
+                    timer_end_time = 0.0
+                    timer_elapsed = 0.0
+                    update_caption()
+                elif event.key == pygame.K_c:
+                    complexity_idx = (complexity_idx + 1) % len(complexity_levels)
+                    maze, start, goal, dist_sg, (dead_ends, branch_nodes, avg_deg), level = build_maze_and_positions()
+                    player_cell = start
+                    player_px, player_py = cell_center_px(player_cell)
+                    moving = False
+                    move_dir = None
+                    target_cell = None
+                    queued_dir = None
+                    won = False
+                    timer_started = False
+                    timer_start_time = 0.0
+                    timer_end_time = 0.0
+                    timer_elapsed = 0.0
+                    update_caption()
+        if moving and target_cell is not None:
+            if move_dir == 'N':
+                player_py = max(player_py - speed_px * dt, target_py)
+            elif move_dir == 'S':
+                player_py = min(player_py + speed_px * dt, target_py)
+            elif move_dir == 'W':
+                player_px = max(player_px - speed_px * dt, target_px)
+            elif move_dir == 'E':
+                player_px = min(player_px + speed_px * dt, target_px)
+            arrived = (abs(player_px - target_px) < 0.5) and (abs(player_py - target_py) < 0.5)
+            if arrived:
+                player_px, player_py = target_px, target_py
+                prev_cell = player_cell
+                player_cell = target_cell
+                moving = False
+                move_dir = None
+                target_cell = None
+                if not timer_started and prev_cell == start and player_cell != start:
+                    timer_started = True
+                    timer_start_time = time.perf_counter()
+                if player_cell == goal:
+                    won = True
+                    if timer_started:
+                        timer_end_time = time.perf_counter()
+                        timer_elapsed = timer_end_time - timer_start_time
+                        timer_started = False
+                if not won:
+                    handle_idle_input()
+        elif not won:
+            handle_idle_input()
+        draw()
+    pygame.quit()
+if __name__ == '__main__':
+    main()
+</file>
+
+</files>

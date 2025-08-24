@@ -75,7 +75,7 @@ def main():
     complexity_idx = 0  # default "extreme"
 
     # Search tuning
-    EXP_RATE_SLOW = 500          # nodes expanded per second
+    EXP_RATE_SLOW = 250          # nodes expanded per second
     EXP_RATE_FAST = 5000
     exp_rate = EXP_RATE_SLOW
     HEURISTIC_WEIGHT = 1.0         # 1.0 = A*, 0.0 = Dijkstra

@@ -91,7 +91,7 @@ def main():
     complexity_idx = 0  # default "extreme"
 
     # Animation tuning
-    PRUNE_RATE_SLOW = 500  # cells pruned per second
+    PRUNE_RATE_SLOW = 20  # cells pruned per second
     PRUNE_RATE_FAST = 5000
     prune_rate = PRUNE_RATE_SLOW
     AUTO_START = True
@@ -337,32 +337,32 @@ def main():
             pygame.draw.circle(screen, BOT_COLOR, (int(bot_px), int(bot_py)), int(cs * 0.30))
 
         # Timers
-        # Search (prune)
-        if search_started and search_end_time == 0.0:
-            cur = time.perf_counter() - search_start_time
-            search_text = f"Prune: {cur:.3f} s"
-        else:
-            search_text = f"Prune: {search_time:.3f} s"
+        # # Search (prune)
+        # if search_started and search_end_time == 0.0:
+        #     cur = time.perf_counter() - search_start_time
+        #     search_text = f"Prune: {cur:.3f} s"
+        # else:
+        #     search_text = f"Prune: {search_time:.3f} s"
 
-        # Traverse
-        if traverse_started and traverse_end_time == 0.0:
-            cur = time.perf_counter() - traverse_start_time
-            traverse_text = f"Traverse: {cur:.3f} s"
-            total_text = f"Total: {(search_time + cur):.3f} s"
-        else:
-            traverse_text = f"Traverse: {traverse_time:.3f} s"
-            total_text = f"Total: {(search_time + traverse_time):.3f} s"
+        # # Traverse
+        # if traverse_started and traverse_end_time == 0.0:
+        #     cur = time.perf_counter() - traverse_start_time
+        #     traverse_text = f"Traverse: {cur:.3f} s"
+        #     total_text = f"Total: {(search_time + cur):.3f} s"
+        # else:
+        #     traverse_text = f"Traverse: {traverse_time:.3f} s"
+        #     total_text = f"Total: {(search_time + traverse_time):.3f} s"
 
-        t1 = font.render(search_text, True, (255, 255, 0))
-        t2 = font.render(traverse_text, True, (255, 255, 0))
-        t3 = font.render(total_text, True, (255, 255, 255))
-        hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle prune speed | ESC=quit", True, (200, 200, 200))
-        meta = font.render(f"prunes/s={prune_rate}", True, (180, 180, 180))
-        screen.blit(t1, (MARGIN, MARGIN - 8))
-        screen.blit(t2, (MARGIN + 200, MARGIN - 8))
-        screen.blit(t3, (MARGIN + 420, MARGIN - 8))
-        screen.blit(meta, (MARGIN, MARGIN + 14))
-        screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
+        # t1 = font.render(search_text, True, (255, 255, 0))
+        # t2 = font.render(traverse_text, True, (255, 255, 0))
+        # t3 = font.render(total_text, True, (255, 255, 255))
+        # hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle prune speed | ESC=quit", True, (200, 200, 200))
+        # meta = font.render(f"prunes/s={prune_rate}", True, (180, 180, 180))
+        # screen.blit(t1, (MARGIN, MARGIN - 8))
+        # screen.blit(t2, (MARGIN + 200, MARGIN - 8))
+        # screen.blit(t3, (MARGIN + 420, MARGIN - 8))
+        # screen.blit(meta, (MARGIN, MARGIN + 14))
+        # screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
 
         pygame.display.flip()
 

@@ -1,6 +1,6 @@
-CELLS_W = 40
-CELLS_H = 40
-CELL_SIZE = 16
+CELLS_W = 10
+CELLS_H = 10
+CELL_SIZE = 48
 
 # Colors
 BG_COLOR = (28, 28, 32)

@@ -59,7 +59,7 @@ def main():
 
     # Controls and tuning
     # BFS rate is tokens-per-second (cells expanded per second). Toggle fast mode with F key.
-    BFS_RATE_SLOW = 500
+    BFS_RATE_SLOW = 20
     BFS_RATE_FAST = 4000
     bfs_rate = BFS_RATE_SLOW
 
@@ -226,30 +226,30 @@ def main():
             pygame.draw.circle(screen, BOT_COLOR, (int(bot_px), int(bot_py)), int(cs * 0.30))
 
         # Timers
-        # Search
-        if search_started and search_end_time == 0.0:
-            cur = time.perf_counter() - search_start_time
-            search_text = f"Search: {cur:.3f} s"
-        else:
-            search_text = f"Search: {search_time:.3f} s"
+        # # Search
+        # if search_started and search_end_time == 0.0:
+        #     cur = time.perf_counter() - search_start_time
+        #     search_text = f"Search: {cur:.3f} s"
+        # else:
+        #     search_text = f"Search: {search_time:.3f} s"
 
-        # Traverse
-        if traverse_started and traverse_end_time == 0.0:
-            cur = time.perf_counter() - traverse_start_time
-            traverse_text = f"Traverse: {cur:.3f} s"
-            total_text = f"Total: {(search_time + cur):.3f} s"
-        else:
-            traverse_text = f"Traverse: {traverse_time:.3f} s"
-            total_text = f"Total: {(search_time + traverse_time):.3f} s"
+        # # Traverse
+        # if traverse_started and traverse_end_time == 0.0:
+        #     cur = time.perf_counter() - traverse_start_time
+        #     traverse_text = f"Traverse: {cur:.3f} s"
+        #     total_text = f"Total: {(search_time + cur):.3f} s"
+        # else:
+        #     traverse_text = f"Traverse: {traverse_time:.3f} s"
+        #     total_text = f"Total: {(search_time + traverse_time):.3f} s"
 
-        t1 = font.render(search_text, True, (255, 255, 0))
-        t2 = font.render(traverse_text, True, (255, 255, 0))
-        t3 = font.render(total_text, True, (255, 255, 255))
-        hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle BFS speed | ESC=quit", True, (200, 200, 200))
-        screen.blit(t1, (MARGIN, MARGIN - 8))
-        screen.blit(t2, (MARGIN + 200, MARGIN - 8))
-        screen.blit(t3, (MARGIN + 420, MARGIN - 8))
-        screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
+        # t1 = font.render(search_text, True, (255, 255, 0))
+        # t2 = font.render(traverse_text, True, (255, 255, 0))
+        # t3 = font.render(total_text, True, (255, 255, 255))
+        # hint = font.render("SPACE=start | R=regen | C=cycle difficulty | F=toggle BFS speed | ESC=quit", True, (200, 200, 200))
+        # screen.blit(t1, (MARGIN, MARGIN - 8))
+        # screen.blit(t2, (MARGIN + 200, MARGIN - 8))
+        # screen.blit(t3, (MARGIN + 420, MARGIN - 8))
+        # screen.blit(hint, (MARGIN, screen_h - MARGIN - 20))
 
         pygame.display.flip()
 

@@ -1,22 +1,22 @@
 import pygame
 import random
+import time
 from collections import deque
 from typing import Dict, List, Tuple, Optional, Set
 from Maze import Maze
-from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR
+from config import CELL_SIZE, CELLS_W, CELLS_H, BG_COLOR, WALL_COLOR, GRID_COLOR, START_COLOR, GOAL_COLOR, PLAYER_COLOR
 
 Cell = Tuple[int, int]
 
 # Colors
-FORWARD_COLOR = (80, 160, 255)    # forward search (blue)
-BACKWARD_COLOR = (160, 80, 255)   # backward search (purple)
+WATER_COLOR = (80, 160, 255)      # flood expand (visited)
 PATH_COLOR = (255, 215, 0)        # chosen path (gold)
 BOT_COLOR = (255, 255, 255)       # bot color (white)
 
-# Shortest-path enumeration config (to avoid noisy meanders)
-MAX_ENUM_SHORTEST = 3000       # cap for enumerating shortest paths
-MAX_DISPLAY_PATHS = 24         # show up to N diverse shortest paths
-SIMILARITY_MAX = 0.85          # Jaccard edge overlap cap (lower -> more diverse)
+# Settings for path enumeration/selection
+MAX_ENUM_SHORTEST = 3000          # cap for enumerating shortest paths
+MAX_DISPLAY_PATHS = 24            # how many diverse shortest paths to overlay
+SIMILARITY_MAX = 0.85             # Jaccard edge overlap threshold (skip near-duplicates)
 
 # Bot speed
 BOT_SPEED_CELLS_PER_SEC = 8.0
@@ -33,6 +33,7 @@ def boundary_cells(maze: Maze) -> List[Cell]:
     for y in range(h):
         cells.append((0, y))
         cells.append((w - 1, y))
+    # Deduplicate corners while preserving order
     return list(dict.fromkeys(cells))
 
 def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
@@ -47,7 +48,7 @@ def bfs_distances(maze: Maze, start: Cell) -> Dict[Cell, int]:
     return dist
 
 def pick_hard_exit(maze: Maze, start: Cell) -> Cell:
-    # Choose a boundary goal from a high-distance band (not strictly the farthest -> avoids deterministic longest)
+    # Choose a boundary goal from a high-distance band (not strictly farthest)
     dist = bfs_distances(maze, start)
     candidates = [(c, dist.get(c, -1)) for c in boundary_cells(maze)]
     candidates = [(c, d) for c, d in candidates if d >= 0 and c != start]
@@ -74,6 +75,7 @@ def path_metrics(path: List[Cell]) -> Tuple[int, int, int, List[str]]:
         return tiles, 0, 0, []
     dirs = [step_dir(path[i], path[i + 1]) for i in range(tiles - 1)]
     turns = sum(1 for i in range(1, len(dirs)) if dirs[i] != dirs[i - 1])
+    # Longest straight run (in steps)
     max_stretch = 1 if dirs else 0
     run = 1
     for i in range(1, len(dirs)):
@@ -88,7 +90,7 @@ def edge_set(path: List[Cell]) -> Set[Tuple[Cell, Cell]]:
     es = set()
     for i in range(len(path) - 1):
         a, b = path[i], path[i + 1]
-        es.add((a, b) if a <= b else (b, a))
+        es.add((a, b) if a <= b else (b, a))  # undirected edge
     return es
 
 def jaccard(a: Set, b: Set) -> float:
@@ -99,7 +101,7 @@ def jaccard(a: Set, b: Set) -> float:
     return inter / union if union else 0.0
 
 def filter_diverse_paths(paths: List[List[Cell]], keep: int, sim_max: float) -> List[List[Cell]]:
-    # Prefer fewer turns, then larger straight stretch
+    # Prefer fewer turns, then larger straight stretch, then lexicographic as fallback
     scored = []
     for p in paths:
         tiles, turns, ms, _ = path_metrics(p)
@@ -114,22 +116,26 @@ def filter_diverse_paths(paths: List[List[Cell]], keep: int, sim_max: float) -> 
         if all(jaccard(es, ke) <= sim_max for ke in kept_edges):
             kept.append(p)
             kept_edges.append(es)
+    # If we kept nothing (edge case), fall back to shortest by turns
     return kept if kept else [scored[0][2]] if scored else []
 
 def enumerate_shortest_paths_from_parents(start: Cell, goal: Cell, parents: Dict[Cell, List[Cell]], cap: int) -> List[List[Cell]]:
-    # parents: node -> list of predecessors along shortest paths
+    # parents maps node -> list of predecessor nodes at distance-1
     paths: List[List[Cell]] = []
     cur: List[Cell] = [goal]
+
     def dfs(c: Cell):
         if len(paths) >= cap:
             return
         if c == start:
-            paths.append(cur[::-1])
+            rev = cur[::-1]
+            paths.append(rev)
             return
         for p in parents.get(c, []):
             cur.append(p)
             dfs(p)
             cur.pop()
+
     dfs(goal)
     return paths
 
@@ -139,16 +145,17 @@ def main():
     screen_w = CELLS_W * CELL_SIZE + MARGIN * 2
     screen_h = CELLS_H * CELL_SIZE + MARGIN * 2
     screen = pygame.display.set_mode((screen_w, screen_h))
-    pygame.display.set_caption('Bidirectional Search (live, multi shortest paths)')
+    pygame.display.set_caption('Maze (Flood Fill with Multiple Shortest Paths)')
     clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
 
     # Controls and tuning
-    SEARCH_RATE_SLOW = 10
-    SEARCH_RATE_FAST = 4000
-    search_rate = SEARCH_RATE_SLOW
+    BFS_RATE_SLOW = 20
+    BFS_RATE_FAST = 4000
+    bfs_rate = BFS_RATE_SLOW
     AUTO_START = True
 
-    # Difficulty presets (hardest default to encourage multiple routes)
+    # Difficulty presets (tuned to produce loops/branches; default hardest)
     complexity_levels = [
         dict(name="perfect", newest=0.95, loop=0.00, junction=0.00, braid=0.00),
         dict(name="hard_branches", newest=0.90, loop=0.14, junction=0.10, braid=0.02),
@@ -156,76 +163,38 @@ def main():
         dict(name="extreme", newest=0.94, loop=0.30, junction=0.20, braid=0.05),
         dict(name="insane", newest=0.95, loop=0.35, junction=0.25, braid=0.08),
     ]
-    complexity_idx = 1  # hardest
+    complexity_idx = 4  # hardest by default
 
-    # Build maze until there are at least two distinct shortest paths between S and G
-    def build_maze_and_positions():
-        level = complexity_levels[complexity_idx]
-        while True:
-            m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
-            m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.7)
-            m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
-            m.braid_dead_ends(braid_prob=level['braid'])
-            s = random_interior_cell(m)
-            g = pick_hard_exit(m, s)
+    # State
+    maze: Maze
+    start: Cell
+    goal: Cell
+    level = complexity_levels[complexity_idx]
 
-            # Quick shortest-path DAG check from start
-            dist: Dict[Cell, int] = {s: 0}
-            parents: Dict[Cell, List[Cell]] = {s: []}
-            q = deque([s])
-            goal_dist: Optional[int] = None
-            while q:
-                c = q.popleft()
-                cd = dist[c]
-                if goal_dist is not None and cd >= goal_dist:
-                    continue
-                for n in m.neighbors(c):
-                    nd = dist.get(n)
-                    if nd is None:
-                        dist[n] = cd + 1
-                        parents[n] = [c]
-                        q.append(n)
-                        if n == g:
-                            goal_dist = cd + 1
-                    elif nd == cd + 1:
-                        if c not in parents.setdefault(n, []):
-                            parents[n].append(c)
-            if g in dist:
-                # preview a couple of shortest paths
-                preview = enumerate_shortest_paths_from_parents(s, g, parents, 3)
-                if len(preview) >= 2:
-                    return m, s, g, level, dist[g]
-
-    maze, start, goal, level, dist_sg = build_maze_and_positions()
-
-    # Bidirectional search state
+    # BFS state
     state = "idle"  # idle -> searching -> selecting -> traversing -> done
-    visited_forward: Set[Cell] = set()
-    visited_backward: Set[Cell] = set()
-    parent_forward: Dict[Cell, Cell] = {}
-    parent_backward: Dict[Cell, Cell] = {}
-    q_forward: deque[Cell] = deque()
-    q_backward: deque[Cell] = deque()
-    frontier_forward: Set[Cell] = set()
-    frontier_backward: Set[Cell] = set()
-    intersection: Optional[Cell] = None
+    dist: Dict[Cell, int] = {}
+    parents: Dict[Cell, List[Cell]] = {}
+    q: deque[Cell] = deque()
+    frontier: Set[Cell] = set()
+    found_goal_dist: Optional[int] = None
 
-    # After meeting: enumerate shortest paths from start
-    sp_parents: Dict[Cell, List[Cell]] = {}
+    # Paths
     all_shortest_paths: List[List[Cell]] = []
     display_paths: List[List[Cell]] = []
-    highlight_idx = 0
+    path: List[Cell] = []
+    path_set: Set[Cell] = set()
+    highlight_idx: int = 0
     show_all_paths_overlay = True
 
-    # Movement along path
-    path: List[Cell] = []
-    bot_px, bot_py = 0.0, 0.0
-    target_px, target_py = 0.0, 0.0
+    # Movement
     bot_cell_index = 0
+    bot_px = bot_py = 0.0
+    target_px = target_py = 0.0
     moving = False
 
-    # Token bucket
-    search_budget = 0.0
+    # Token bucket for BFS rate
+    bfs_budget = 0.0
 
     def cell_center_px(cell: Cell) -> Tuple[float, float]:
         x, y = cell
@@ -233,9 +202,9 @@ def main():
 
     def set_caption(phase: str):
         title = (
-            f"Bidirectional | {level['name']} | {CELLS_W}x{CELLS_H} | "
+            f"Flood Fill | {level['name']} | {CELLS_W}x{CELLS_H} | "
             f"loops={level['loop']:.2f} junction={level['junction']:.2f} braid={level['braid']:.2f} | "
-            f"start→goal≈{dist_sg} | {phase.upper()}"
+            f"{phase.upper()}"
         )
         if state == "selecting" and display_paths:
             p = display_paths[highlight_idx]
@@ -269,25 +238,24 @@ def main():
                 if walls['E']:
                     pygame.draw.line(screen, WALL_COLOR, (cx + cs, cy), (cx + cs, cy + cs), 3)
 
-        # Search visualization
-        if state in ("searching", "selecting"):
+        # Flood fill visited cells (only during searching)
+        if state == "searching":
             pad = 5
-            for (x, y) in visited_forward:
+            for (x, y) in dist.keys():
                 rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
-                pygame.draw.rect(screen, FORWARD_COLOR, rect, border_radius=6)
-            for (x, y) in visited_backward:
-                rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
-                pygame.draw.rect(screen, BACKWARD_COLOR, rect, border_radius=6)
+                pygame.draw.rect(screen, WATER_COLOR, rect, border_radius=6)
 
         # Path overlays during selection/traversal
         pad = 5
         if state in ("selecting", "traversing", "done"):
             if state == "selecting" and show_all_paths_overlay:
-                # palette for overlay paths
+                # Draw all (top N) shortest paths, each in a subtle color band
+                # We draw cells, not polylines, for clarity
                 colors = []
                 n = max(1, len(display_paths))
                 for i in range(n):
                     hue = i / n
+                    # convert hue to RGB-ish palette
                     r = int(120 + 120 * (1 + -1 * abs(2 * hue - 1)))
                     g = int(100 + 120 * hue)
                     b = int(220 - 160 * hue)
@@ -298,6 +266,7 @@ def main():
                         rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
                         pygame.draw.rect(screen, color, rect, border_radius=4)
             else:
+                # Draw only the highlighted (selecting) or chosen (traversing/done) path
                 draw_path = path if path else (display_paths[highlight_idx] if display_paths else [])
                 for (x, y) in set(draw_path):
                     rect = pygame.Rect(m + x * cs + pad, m + y * cs + pad, cs - 2 * pad, cs - 2 * pad)
@@ -317,71 +286,46 @@ def main():
 
         pygame.display.flip()
 
-    def compute_all_shortest_paths_via_single_source() -> None:
-        nonlocal sp_parents, all_shortest_paths, display_paths, highlight_idx
-        # Single-source BFS DAG from start to goal, then enumerate shortest paths
-        dist: Dict[Cell, int] = {start: 0}
-        sp_parents = {start: []}
-        q = deque([start])
-        goal_dist: Optional[int] = None
-        while q:
-            c = q.popleft()
-            cd = dist[c]
-            if goal_dist is not None and cd >= goal_dist:
-                continue
-            for n in maze.neighbors(c):
-                nd = dist.get(n)
-                if nd is None:
-                    dist[n] = cd + 1
-                    sp_parents[n] = [c]
-                    q.append(n)
-                    if n == goal:
-                        goal_dist = cd + 1
-                elif nd == cd + 1:
-                    if c not in sp_parents.setdefault(n, []):
-                        sp_parents[n].append(c)
-        if goal in dist:
-            all_shortest_paths = enumerate_shortest_paths_from_parents(start, goal, sp_parents, MAX_ENUM_SHORTEST)
-            display_paths = filter_diverse_paths(all_shortest_paths, MAX_DISPLAY_PATHS, SIMILARITY_MAX)
-            highlight_idx = 0
-            # Print a summary to console
-            print(f"\nShortest path count (cap {MAX_ENUM_SHORTEST}): {len(all_shortest_paths)}")
-            print(f"Displaying {len(display_paths)} diverse shortest paths:")
-            print("idx | tiles | turns | maxStraight | directions (preview)")
-            for idx, p in enumerate(display_paths):
-                tiles, turns, ms, dirs = path_metrics(p)
-                preview = ''.join(dirs)[:60] + ('…' if len(dirs) > 60 else '')
-                print(f"{idx:3d} | {tiles:5d} | {turns:5d} | {ms:11d} | {preview}")
+    def prepare_selection():
+        nonlocal all_shortest_paths, display_paths, highlight_idx, state
+        # Enumerate shortest paths from parents DAG
+        all_shortest_paths = enumerate_shortest_paths_from_parents(start, goal, parents, MAX_ENUM_SHORTEST)
+        # Filter for diversity (avoid trivially similar routes)
+        display_paths = filter_diverse_paths(all_shortest_paths, MAX_DISPLAY_PATHS, SIMILARITY_MAX)
+        highlight_idx = 0
+
+        # Print to console
+        print(f"\nShortest path count (enumerated, capped at {MAX_ENUM_SHORTEST}): {len(all_shortest_paths)}")
+        print(f"Displaying top {len(display_paths)} diverse shortest paths:")
+        print("idx | tiles | turns | maxStraight | directions (preview)")
+        for idx, p in enumerate(display_paths):
+            tiles, turns, ms, dirs = path_metrics(p)
+            preview = ''.join(dirs)[:60] + ('…' if len(dirs) > 60 else '')
+            print(f"{idx:3d} | {tiles:5d} | {turns:5d} | {ms:11d} | {preview}")
+
+        state = "selecting"
+        set_caption("selecting")
 
     def start_search():
-        nonlocal state, visited_forward, visited_backward, parent_forward, parent_backward
-        nonlocal q_forward, q_backward, frontier_forward, frontier_backward, intersection
-        visited_forward.clear()
-        visited_backward.clear()
-        parent_forward.clear()
-        parent_backward.clear()
-        q_forward.clear()
-        q_backward.clear()
-        frontier_forward.clear()
-        frontier_backward.clear()
-        intersection = None
-        # seeds
-        q_forward.append(start)
-        visited_forward.add(start)
-        parent_forward[start] = start
-        frontier_forward.add(start)
-        q_backward.append(goal)
-        visited_backward.add(goal)
-        parent_backward[goal] = goal
-        frontier_backward.add(goal)
+        nonlocal state, dist, parents, q, frontier, found_goal_dist
+        dist.clear()
+        parents.clear()
+        q.clear()
+        frontier.clear()
+        found_goal_dist = None
+
+        q.append(start)
+        dist[start] = 0
+        frontier.add(start)
         state = "searching"
         set_caption("searching")
 
     def start_traversal(selected_path: List[Cell]):
-        nonlocal path, bot_px, bot_py, target_px, target_py, moving, bot_cell_index, state
+        nonlocal path, path_set, bot_px, bot_py, target_px, target_py, moving, bot_cell_index, state
         if not selected_path:
             return
         path = selected_path
+        path_set = set(path)
         bot_cell_index = 0
         bot_px, bot_py = cell_center_px(path[0])
         if len(path) > 1:
@@ -395,7 +339,49 @@ def main():
         print(f"\nChosen path: tiles={tiles}, turns={turns}, maxStraight={ms}")
         set_caption("traversing")
 
+    def build_maze_and_positions():
+        nonlocal maze, start, goal, level
+        level = complexity_levels[complexity_idx]
+        # Generate until at least 2 distinct shortest paths exist (genuine alternatives)
+        while True:
+            m = Maze.generate_growing_tree(CELLS_W, CELLS_H, newest_bias=level['newest'])
+            m.add_loops_smart(loop_prob=level['loop'], avoid_dead_ends=True, center_bias=0.7)
+            m.enrich_junctions(prob=level['junction'], avoid_dead_ends=True)
+            m.braid_dead_ends(braid_prob=level['braid'])
+            s = random_interior_cell(m)
+            g = pick_hard_exit(m, s)
+
+            # Quick check for multiple shortest paths
+            # Run a fast BFS to build parents
+            d: Dict[Cell, int] = {s: 0}
+            par: Dict[Cell, List[Cell]] = {s: []}
+            qq = deque([s])
+            dist_g: Optional[int] = None
+            while qq:
+                c = qq.popleft()
+                cd = d[c]
+                if dist_g is not None and cd >= dist_g:
+                    continue
+                for n in m.neighbors(c):
+                    nd = d.get(n)
+                    if nd is None:
+                        d[n] = cd + 1
+                        par[n] = [c]
+                        qq.append(n)
+                        if n == g:
+                            dist_g = cd + 1
+                    elif nd == cd + 1:
+                        # Extra parent (same shortest distance)
+                        if c not in par.setdefault(n, []):
+                            par[n].append(c)
+            if g in d:
+                paths_preview = enumerate_shortest_paths_from_parents(s, g, par, 3)
+                if len(paths_preview) >= 2:
+                    maze, start, goal = m, s, g
+                    return
+
     # Initial kick-off
+    build_maze_and_positions()
     if AUTO_START:
         start_search()
 
@@ -411,14 +397,14 @@ def main():
                 if event.key in (pygame.K_ESCAPE,):
                     running = False
                 elif event.key == pygame.K_r:
-                    maze, start, goal, level, dist_sg = build_maze_and_positions()
+                    build_maze_and_positions()
                     start_search()
                 elif event.key == pygame.K_c:
                     complexity_idx = (complexity_idx + 1) % len(complexity_levels)
-                    maze, start, goal, level, dist_sg = build_maze_and_positions()
+                    build_maze_and_positions()
                     start_search()
                 elif event.key == pygame.K_f:
-                    search_rate = SEARCH_RATE_FAST if search_rate == SEARCH_RATE_SLOW else SEARCH_RATE_SLOW
+                    bfs_rate = 4000 if bfs_rate == BFS_RATE_SLOW else BFS_RATE_SLOW
 
                 # Selection controls
                 if state == "selecting" and display_paths:
@@ -431,10 +417,12 @@ def main():
                     elif event.key == pygame.K_RETURN:
                         start_traversal(display_paths[highlight_idx])
                     elif event.key == pygame.K_s:
+                        # pick min turns
                         best = min(range(len(display_paths)), key=lambda i: (path_metrics(display_paths[i])[1], -path_metrics(display_paths[i])[2]))
                         highlight_idx = best
                         set_caption("selecting")
                     elif event.key == pygame.K_l:
+                        # pick max turns (more meandering)
                         best = max(range(len(display_paths)), key=lambda i: (path_metrics(display_paths[i])[1], path_metrics(display_paths[i])[2]))
                         highlight_idx = best
                         set_caption("selecting")
@@ -442,48 +430,48 @@ def main():
                         show_all_paths_overlay = not show_all_paths_overlay
                         set_caption("selecting")
 
-        # Update bidirectional search
+        # Update BFS (searching)
         if state == "searching":
-            search_budget += search_rate * dt
-            steps = int(search_budget)
+            bfs_budget += bfs_rate * dt
+            steps = int(bfs_budget)
             if steps > 0:
-                search_budget -= steps
-            found = False
-            for _ in range(steps):
-                # Alternate forward/backward
-                if q_forward and not found:
-                    c = q_forward.popleft()
-                    frontier_forward.discard(c)
-                    for n in maze.neighbors(c):
-                        if n not in visited_forward:
-                            visited_forward.add(n)
-                            parent_forward[n] = c
-                            q_forward.append(n)
-                            frontier_forward.add(n)
-                            if n in visited_backward:
-                                found = True
-                                break
-                if q_backward and not found:
-                    c = q_backward.popleft()
-                    frontier_backward.discard(c)
-                    for n in maze.neighbors(c):
-                        if n not in visited_backward:
-                            visited_backward.add(n)
-                            parent_backward[n] = c
-                            q_backward.append(n)
-                            frontier_backward.add(n)
-                            if n in visited_forward:
-                                found = True
-                                break
-                if found:
-                    break
-            if found:
-                # Moment both waves meet: we switch to shortest-path DAG to list alternatives
-                compute_all_shortest_paths_via_single_source()
-                state = "selecting"
-                set_caption("selecting")
+                bfs_budget -= steps
 
-        # Traverse
+            done = False
+            for _ in range(steps):
+                if not q:
+                    done = True
+                    break
+
+                c = q.popleft()
+                frontier.discard(c)
+                cd = dist[c]
+
+                # If we already discovered goal distance, we only process nodes with depth < goal_dist
+                if found_goal_dist is not None and cd >= found_goal_dist:
+                    done = True
+                    break
+
+                for n in maze.neighbors(c):
+                    newd = cd + 1
+                    nd = dist.get(n)
+                    if nd is None:
+                        dist[n] = newd
+                        parents[n] = [c]
+                        q.append(n)
+                        frontier.add(n)
+                        if n == goal and found_goal_dist is None:
+                            found_goal_dist = newd
+                    elif newd == nd:
+                        # Register extra parent for multiple shortest routes
+                        if c not in parents.setdefault(n, []):
+                            parents[n].append(c)
+
+            if done or (goal in dist and found_goal_dist is not None):
+                # Prepare selection of shortest paths
+                prepare_selection()
+
+        # Move bot along the path
         if state == "traversing" and path:
             speed_px = BOT_SPEED_CELLS_PER_SEC * CELL_SIZE
             dx = target_px - bot_px
